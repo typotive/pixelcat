@@ -73,8 +73,8 @@ installed (otherwise Google Sans or Segoe UI).
 
 ## Install & run
 ```bash
-git clone https://github.com/<your-username>/desktop-cat.git
-cd desktop-cat
+git clone https://github.com/typotive/poochaser_assistant.git
+cd poochaser_assistant
 pip install -r requirements.txt
 python desktop_cat.py
 ```
