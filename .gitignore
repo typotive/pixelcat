@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Font files: most typefaces can't be redistributed; users install their own
+# (or drop them into ./fonts locally).
+*.ttf
+*.otf
+fonts/
+
+# Local runtime data (normally lives in %LOCALAPPDATA%\DesktopCat)
+*.bin
+state.json
+
+# OS / editor
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+.idea/
