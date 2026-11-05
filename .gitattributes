@@ -1,0 +1,3 @@
+# Installers must keep their native line endings on every system, or they stop running.
+*.command text eol=lf
+*.bat text eol=crlf

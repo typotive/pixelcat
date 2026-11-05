@@ -45,8 +45,7 @@ left mouse button to move it. Ctrl+C in the terminal also quits.
 
 Fetching files (how the index works)
 ------------------------------------
-Modelled on voidtools Everything: index file *names* only, not contents, and search
-them as you type.
+Index file *names* only, not contents, and search them as you type.
 * Index: every name sits in one packed lowercase byte blob, with arrays of offsets and
   parent-folder numbers. There are no per-file Python objects, so a million files take
   tens of MB, and a search is a few C-speed bytes.find() calls over the blob.
@@ -55,7 +54,6 @@ them as you type.
   index_max_age_min.
 * Real-time updates: ReadDirectoryChangesW watches each drive root recursively
   (no admin needed). Creates, deletes and renames are applied live.
-  (Everything reads the NTFS MFT and USN journal directly instead, which requires admin.)
 * Search syntax:  words = AND (all must match),  !word = NOT,  "exact phrase",
   ext:pdf;docx,  file: / folder:,  wild*cards?,  terms with \\ match the full path.
 * In the popup: Enter / double-click = go to the location (a file is selected in its
@@ -66,8 +64,8 @@ them as you type.
 
 Typeface
 --------
-Text uses Redaction 50 Italic when available (installed, or as a .ttf/.otf in a "fonts"
-folder next to this script), then Google Sans, then Segoe UI / Arial.
+Text uses the first available typeface in FONT_CHOICES (installed, or as a .ttf/.otf in a
+"fonts" folder next to this script), falling back to system sans-serif fonts.
 
 Liquid-glass bubbles
 --------------------
@@ -116,9 +114,15 @@ except ImportError:  # pragma: no cover - depends on what is installed
 Qt = QtCore.Qt
 
 
+SEP = os.sep  # "\\" on Windows, "/" on macOS
+
+
 def _default_exclude_paths() -> tuple[str, ...]:
-    paths = [os.environ.get("SystemRoot", r"C:\Windows"), os.environ.get("ProgramData", r"C:\ProgramData")]
-    return tuple(p.lower().rstrip("\\") for p in paths if p)
+    if sys.platform == "darwin":
+        paths = [str(Path.home() / "Library"), str(Path.home() / ".Trash")]
+    else:
+        paths = [os.environ.get("SystemRoot", r"C:\Windows"), os.environ.get("ProgramData", r"C:\ProgramData")]
+    return tuple(p.lower().rstrip(SEP) for p in paths if p)
 
 
 # =================================================================================
@@ -157,7 +161,7 @@ class Config:
     walk_speed_px: int = 2             # pixels per movement tick
     pixel_scale: int = 5               # size of one sprite "pixel" on screen
 
-    # --- File fetch (Everything-style name index) ---
+    # --- File fetch (name index) ---
     index_roots: tuple[str, ...] = ()  # empty = every fixed drive
     index_exclude_names: tuple[str, ...] = (
         "$recycle.bin", "system volume information", "appdata", "node_modules", ".git",
@@ -219,7 +223,7 @@ CHATTER = [
 ]
 
 # Preferred UI typefaces as (family, italic), first match wins.
-FONT_CHOICES = [("Redaction 50", True), ("Google Sans", False), ("Google Sans Flex", False),
+FONT_CHOICES = [("Redaction 50", True),
                 ("Segoe UI Variable Text", False), ("Segoe UI", False), ("Helvetica Neue", False), ("Arial", False)]
 
 
@@ -300,15 +304,33 @@ class IdleDetector:
             self._user32 = ctypes.windll.user32
             self._kernel32 = ctypes.windll.kernel32
             self._kernel32.GetTickCount.restype = ctypes.c_uint32
+        self._quartz_idle = self._load_quartz_idle()
         # Fallback state: cursor polling
         self._last_pos = None
         self._last_move = time.monotonic()
+
+    @staticmethod
+    def _load_quartz_idle():
+        """macOS: seconds since any mouse/keyboard event (needs no permissions)."""
+        if sys.platform != "darwin":
+            return None
+        try:
+            lib = ctypes.CDLL("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")
+            fn = lib.CGEventSourceSecondsSinceLastEventType
+            fn.restype = ctypes.c_double
+            fn.argtypes = [ctypes.c_int32, ctypes.c_uint32]
+            return fn
+        except (OSError, AttributeError):
+            return None
 
     def idle_seconds(self) -> float:
         if self._use_win32 and self._user32.GetLastInputInfo(ctypes.byref(self._lii)):
             # Both values are 32-bit millisecond tick counts; mask handles the 49-day wrap.
             elapsed_ms = (self._kernel32.GetTickCount() - self._lii.dwTime) & 0xFFFFFFFF
             return elapsed_ms / 1000.0
+
+        if self._quartz_idle is not None:
+            return float(self._quartz_idle(1, 0xFFFFFFFF))  # combined session state, any input event
 
         # Cross-platform fallback: only mouse movement counts as activity.
         pos = QtGui.QCursor.pos()
@@ -388,21 +410,22 @@ class ActivityTracker(QtCore.QObject):
 
 
 # =================================================================================
-# File index (Everything-style: names only, packed in memory, updated live)
+# File index (names only, packed in memory, updated live)
 # =================================================================================
 FILE_ATTRIBUTE_DIRECTORY = 0x10
 FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 # Junctions and symlinks are not followed (they create loops and duplicates). Other
-# reparse points ARE walked: OneDrive/cloud folders are reparse points too.
+# reparse points ARE walked: cloud-sync folders are reparse points too.
 SKIP_REPARSE_TAGS = (0xA0000003, 0xA000000C)  # IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK
 CACHE_MAGIC = b"DCATIDX2"
 # Results inside these rank first...
-USER_CONTENT = ("\\desktop\\", "\\documents\\", "\\downloads\\", "\\onedrive", "\\pictures\\",
-                "\\videos\\", "\\music\\")
+USER_CONTENT = tuple(s.replace("\\", SEP) for s in (
+    "\\desktop\\", "\\documents\\", "\\downloads\\", "\\onedrive", "\\pictures\\", "\\videos\\", "\\music\\"))
 # ...and paths containing these rank last.
-NOISE_SEGMENTS = ("\\appdata\\", "\\program files", "\\windows\\", "\\$recycle", "\\node_modules\\",
-                  "\\site-packages\\", "\\temp\\", "\\cache", "\\vendor\\", "\\registry\\", "packagecache",
-                  "pip_prebundle", "extscache", "\\dist\\", "\\build\\", "\\target\\", "\\.")
+NOISE_SEGMENTS = tuple(s.replace("\\", SEP) for s in (
+    "\\appdata\\", "\\program files", "\\windows\\", "\\$recycle", "\\node_modules\\",
+    "\\site-packages\\", "\\temp\\", "\\cache", "\\vendor\\", "\\registry\\", "packagecache",
+    "pip_prebundle", "extscache", "\\dist\\", "\\build\\", "\\target\\", "\\."))
 
 
 @dataclass
@@ -463,7 +486,7 @@ class NameTable:
             j = self.parent[j]
         for k in reversed(chain):
             part = self.name(k)
-            base = part if base is None else base + "\\" + part
+            base = part if base is None else base + SEP + part
             memo[k] = base
         return base
 
@@ -479,7 +502,7 @@ class NameTable:
 
     def lookup(self, path_l: str) -> int | None:
         """Entry index for an exact lowercase full path, if present."""
-        name = path_l.rstrip("\\").rsplit("\\", 1)[-1].encode("utf-8", "surrogatepass")
+        name = path_l.rstrip(SEP).rsplit(SEP, 1)[-1].encode("utf-8", "surrogatepass")
         blob, offsets, pos = self.lower, self.lower_off, 0
         needle = b"\n" + name + b"\n"
         while True:
@@ -525,7 +548,7 @@ class NameTable:
 
 
 class Query:
-    """Parses Everything-like search text: AND terms, !NOT, "phrases", ext:, file:/folder:,
+    """Parses search text: AND terms, !NOT, "phrases", ext:, file:/folder:,
     wildcards, and path terms containing a backslash."""
 
     def __init__(self, text: str) -> None:
@@ -538,7 +561,7 @@ class Query:
         fragments = []
         for tok in re.findall(r'!?"[^"]*"|\S+', text):
             neg = tok.startswith("!")
-            tok = (tok[1:] if neg else tok).strip('"').lower().replace("/", "\\")
+            tok = (tok[1:] if neg else tok).strip('"').lower().replace("/", SEP).replace("\\", SEP)
             if not tok:
                 continue
             if tok.startswith("ext:"):
@@ -550,9 +573,9 @@ class Query:
             elif "*" in tok or "?" in tok:
                 self.patterns.append(re.compile(fnmatch.translate(tok)))
                 fragments.append(max(re.split(r"[*?]", tok), key=len))
-            elif "\\" in tok:
+            elif SEP in tok:
                 self.path_terms.append(tok)
-                fragments.append(tok.rstrip("\\").rsplit("\\", 1)[-1])
+                fragments.append(tok.rstrip(SEP).rsplit(SEP, 1)[-1])
             else:
                 self.terms.append(tok)
         # The "driver" is the longest literal that must appear in the name; it is what we
@@ -591,7 +614,7 @@ class Query:
             quality = 3
         noise = sum(s in path_l for s in NOISE_SEGMENTS)  # "\\." = any dot-folder (.git, .cargo...)
         not_user_content = not any(s in path_l for s in USER_CONTENT)
-        return (noise, quality, not_user_content, path_l.count("\\"), len(name_l))
+        return (noise, quality, not_user_content, path_l.count(SEP), len(name_l))
 
 
 class _DirWatcher(threading.Thread):
@@ -657,6 +680,13 @@ class background_io:
             k32.SetThreadPriority(k32.GetCurrentThread(), self.END)
 
 
+def app_data_dir() -> Path:
+    """Where the file index and reminder state live."""
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "DesktopCat"
+    return Path(os.environ.get("LOCALAPPDATA", Path.home() / ".cache")) / "DesktopCat"
+
+
 def default_index_roots() -> list[str]:
     if sys.platform != "win32":
         return [str(Path.home())]
@@ -679,8 +709,7 @@ class FileIndex(QtCore.QObject):
         super().__init__()
         self.cfg = cfg
         self.roots = list(cfg.index_roots) or default_index_roots()
-        local = Path(os.environ.get("LOCALAPPDATA", Path.home() / ".cache"))
-        self.cache_path = cache_path or local / "DesktopCat" / "file_index.bin"
+        self.cache_path = cache_path or app_data_dir() / "file_index.bin"
         self.table: NameTable | None = None
         self.scanning = False
         self.scanned = 0
@@ -691,7 +720,7 @@ class FileIndex(QtCore.QObject):
         self._removed_idx: set[int] = set()    # tombstoned table entries
         self._removed_paths: set[str] = set()  # same, by path (re-applied after a rescan)
         self._exclude_names = set(cfg.index_exclude_names)
-        self._exclude_paths = tuple(p.lower().rstrip("\\") for p in cfg.index_exclude_paths)
+        self._exclude_paths = tuple(p.lower().rstrip(SEP) for p in cfg.index_exclude_paths)
 
     # --- lifecycle -----------------------------------------------------------------
     def start(self) -> None:
@@ -733,7 +762,7 @@ class FileIndex(QtCore.QObject):
         if self.table is None:
             self.table = table  # first run: let searches see partial results while scanning
         for root in self.roots:
-            stack = [(root, table.add(root.rstrip("\\"), -1, True))]
+            stack = [(root, table.add(root.rstrip(SEP), -1, True))]
             while stack:
                 folder, parent = stack.pop()
                 try:
@@ -779,7 +808,7 @@ class FileIndex(QtCore.QObject):
     def _path_excluded(self, path_l: str) -> bool:
         if path_l.startswith(self._exclude_paths) or path_l.startswith(str(self.cache_path.parent).lower()):
             return True
-        return any(part in self._exclude_names for part in path_l.split("\\")[:-1])
+        return any(part in self._exclude_names for part in path_l.split(SEP)[:-1])
 
     def _on_fs_event(self, action: int, path: str) -> None:
         path_l = path.lower()
@@ -810,7 +839,7 @@ class FileIndex(QtCore.QObject):
     def _remove_live(self, path_l: str) -> None:
         with self._lock:
             if self._added.pop(path_l, None) is not None:
-                prefix = path_l + "\\"
+                prefix = path_l + SEP
                 for key in [k for k in self._added if k.startswith(prefix)]:
                     del self._added[key]
                 return
@@ -850,14 +879,14 @@ class FileIndex(QtCore.QObject):
                     continue
                 path_l = path.lower()
                 if q.path_ok(path_l):
-                    scored[path_l] = (q.rank(path_l.rsplit("\\", 1)[-1], path_l), path, is_dir)
+                    scored[path_l] = (q.rank(path_l.rsplit(SEP, 1)[-1], path_l), path, is_dir)
         for path, is_dir in overlay:
             path_l = path.lower()
-            name_l = path_l.rsplit("\\", 1)[-1]
+            name_l = path_l.rsplit(SEP, 1)[-1]
             if q.name_ok(name_l, is_dir) and q.path_ok(path_l):
                 scored[path_l] = (q.rank(name_l, path_l), path, is_dir)
         best = sorted(scored.values(), key=lambda s: s[0])[:limit]
-        return [Hit(path, path.rsplit("\\", 1)[-1] or path, is_dir) for _, path, is_dir in best]
+        return [Hit(path, path.rsplit(SEP, 1)[-1] or path, is_dir) for _, path, is_dir in best]
 
 
 # --- Installed apps ------------------------------------------------------------------
@@ -870,8 +899,26 @@ def start_menu_dirs() -> list[str]:
     return [os.path.join(env[v], rel) for v in ("ProgramData", "APPDATA") if env.get(v)]
 
 
+def mac_app_bundles() -> list[str]:
+    """.app bundles in the Applications folders, one subfolder deep (e.g. Utilities)."""
+    if sys.platform != "darwin":
+        return []
+    bundles = []
+    for root in ("/Applications", "/System/Applications", str(Path.home() / "Applications")):
+        for folder in (root, *(e.path for e in _scandir_safe(root) if e.is_dir() and not e.name.endswith(".app"))):
+            bundles += [e.path for e in _scandir_safe(folder) if e.name.endswith(".app")]
+    return bundles
+
+
+def _scandir_safe(folder: str) -> list[os.DirEntry]:
+    try:
+        return list(os.scandir(folder))
+    except OSError:
+        return []
+
+
 def _start_apps() -> list[tuple[str, str]]:
-    """(name, AppID) for everything the Start menu lists, including Microsoft Store apps."""
+    """(name, AppID) for everything the Start menu lists, including Store apps."""
     if sys.platform != "win32":
         return []
     ps = ("[Console]::OutputEncoding = [Text.Encoding]::UTF8; "
@@ -916,6 +963,9 @@ class AppIndex(QtCore.QObject):
                     stem, ext = os.path.splitext(f)
                     if ext.lower() in (".lnk", ".appref-ms") and "uninstall" not in stem.lower():
                         found.setdefault(stem.lower(), Hit(os.path.join(root, f), stem, False, "app"))
+        for path in mac_app_bundles():
+            stem = os.path.splitext(os.path.basename(path))[0]
+            found.setdefault(stem.lower(), Hit(path, stem, False, "app"))
         for name, app_id in _start_apps():
             if "uninstall" not in name.lower():
                 found.setdefault(name.lower(), Hit("shell:AppsFolder\\" + app_id, name, False, "app"))
@@ -938,7 +988,9 @@ class AppIndex(QtCore.QObject):
 
 
 def launch_app(target: str) -> None:
-    if target.startswith("shell:AppsFolder\\"):
+    if sys.platform == "darwin":
+        subprocess.Popen(["open", target])
+    elif target.startswith("shell:AppsFolder\\"):
         subprocess.Popen(["explorer.exe", target], creationflags=CREATE_NO_WINDOW)
     else:
         os.startfile(target)
@@ -974,6 +1026,8 @@ def force_foreground(widget: QtWidgets.QWidget) -> None:
 def reveal_path(path: str) -> None:
     if sys.platform == "win32":
         subprocess.Popen(f'explorer /select,"{path}"')
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", "-R", path])  # Finder, with the item selected
     else:
         open_path(os.path.dirname(path))
 
@@ -1099,11 +1153,13 @@ class CobraCleaner(QtCore.QObject):
 
     def cache_dirs(self) -> list[str]:
         env = os.environ
-        local = env.get("LOCALAPPDATA", "")
-        candidates = [env.get("TEMP"), env.get("TMP"), os.path.join(local, "Temp"),
-                      os.path.join(env.get("SystemRoot", r"C:\Windows"), "Temp"),
-                      os.path.join(local, "Microsoft", "Windows", "INetCache"),
-                      os.path.join(local, "CrashDumps"), *self.cfg.cobra_extra_dirs]
+        candidates = list(self.cfg.cobra_extra_dirs)
+        local = env.get("LOCALAPPDATA")
+        if sys.platform == "win32" and local:  # no default cleanup targets on other systems
+            candidates += [env.get("TEMP"), env.get("TMP"), os.path.join(local, "Temp"),
+                           os.path.join(env.get("SystemRoot", r"C:\Windows"), "Temp"),
+                           os.path.join(local, "Microsoft", "Windows", "INetCache"),
+                           os.path.join(local, "CrashDumps")]
         seen, dirs = set(), []
         for d in candidates:
             if d and os.path.isdir(d):
@@ -1419,6 +1475,7 @@ class CatWindow(QtWidgets.QWidget):
     def __init__(self, sprites: SpriteSheet, cfg: Config, ui_font: UIFont) -> None:
         super().__init__(None, PET_WINDOW_FLAGS)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow)  # macOS hides tool windows otherwise
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.sprites = sprites
         self.cfg = cfg
@@ -1719,6 +1776,7 @@ class CobraWindow(QtWidgets.QWidget):
     def __init__(self, sprites: SpriteSheet, ui_font: UIFont) -> None:
         super().__init__(None, PET_WINDOW_FLAGS)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow)  # macOS hides tool windows otherwise
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)  # clicks pass through
         self.frames = sprites.cobra_frames()
@@ -1903,6 +1961,7 @@ class GlassWindow(QtWidgets.QWidget):
     def __init__(self, flags, refresh_ms: int, activates: bool) -> None:
         super().__init__(None, flags)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow)  # macOS hides tool windows otherwise
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, not activates)
         self._style = "info"
         self._tail_x = 0.0
@@ -1928,6 +1987,8 @@ class GlassWindow(QtWidgets.QWidget):
 
     def _refresh_backdrop(self) -> None:
         """Grab the screen area behind the window and keep a small (= blurred) copy."""
+        if sys.platform == "darwin":
+            return  # would trigger the Screen Recording permission prompt; plain tint instead
         if self.isVisible() and not self._live_backdrop:
             return  # would capture ourselves
         screen = QtGui.QGuiApplication.screenAt(self.geometry().center()) or QtGui.QGuiApplication.primaryScreen()
@@ -2396,7 +2457,7 @@ class FetchPopup(GlassWindow):
             if hit.kind == "app":
                 folder = "Application"
             else:
-                folder = hit.path.rsplit("\\", 1)[0] if "\\" in hit.path else hit.path
+                folder = hit.path.rsplit(SEP, 1)[0] if SEP in hit.path else hit.path
             p.drawText(QtCore.QRectF(text_x, row.top() + 22, text_w, 18), int(Qt.AlignmentFlag.AlignVCenter),
                        path_fm.elidedText(folder, Qt.TextElideMode.ElideMiddle, text_w))
 
@@ -2723,7 +2784,7 @@ class DesktopPet(QtCore.QObject):
     def _on_fetched(self, action: str, path: str) -> None:
         if action in ("reveal", "open") and self.cfg.fetch_trip:
             # The cat runs off-screen and comes back with the item before it opens.
-            name = path.rstrip("\\").rsplit("\\", 1)[-1] or path
+            name = path.rstrip(SEP).rsplit(SEP, 1)[-1] or path
             icon = self.fetch._icon_for(Hit(path, name, os.path.isdir(path))).pixmap(32, 32)
             self._trip_delivery = (action, path)
             self.bubble.hide()
@@ -2750,8 +2811,8 @@ class DesktopPet(QtCore.QObject):
         QtCore.QTimer.singleShot(1500, self.cat.drop_item)  # hold it up for a moment, then drop
 
     def _deliver(self, action: str, path: str) -> None:
-        name = path.rstrip("\\").rsplit("\\", 1)[-1] or path
-        wrapped = path.replace("\\", "\\​")  # zero-width spaces let long paths wrap
+        name = path.rstrip(SEP).rsplit(SEP, 1)[-1] or path
+        wrapped = path.replace(SEP, SEP + "\u200b")  # zero-width spaces let long paths wrap
         try:
             if action == "open":
                 open_path(path)
@@ -2947,7 +3008,7 @@ class DesktopPet(QtCore.QObject):
 # =================================================================================
 # Single instance + shortcut install
 # =================================================================================
-INSTANCE_KEY = f"DesktopCat-{os.environ.get('USERNAME', 'user')}"
+INSTANCE_KEY = f"DesktopCat-{os.environ.get('USERNAME') or os.environ.get('USER', 'user')}"
 
 
 def notify_running_instance() -> bool:
@@ -2970,19 +3031,48 @@ def listen_for_launches(pet: DesktopPet) -> QtNetwork.QLocalServer:
     return server
 
 
-def install_shortcuts() -> list[str]:
-    """Write desktop_cat.ico and create 'Desktop Cat' shortcuts on the Desktop and in the
-    Start menu (both launch with pythonw, so no console window appears)."""
-    script = Path(__file__).resolve()
-    icon = script.with_name("desktop_cat.ico")
-    sheet = SpriteSheet(12, 1.0)
-    canvas = QtGui.QImage(256, 256, QtGui.QImage.Format.Format_ARGB32)
+def app_icon_image(size: int) -> QtGui.QImage:
+    """The dedicated icon: the standing cat, centred on a transparent square."""
+    unit = size // (CAT_ART_W + 2)
+    art = render_art(SPRITE_ART["stand"], unit, PALETTE)
+    canvas = QtGui.QImage(size, size, QtGui.QImage.Format.Format_ARGB32)
     canvas.fill(Qt.GlobalColor.transparent)
     p = QtGui.QPainter(canvas)
-    pix = sheet.frames["stand"][1]
-    p.drawPixmap((256 - pix.width()) // 2, (256 - pix.height()) // 2, pix)
+    # +unit: the two spare paw columns on the right would otherwise push the cat off-centre.
+    p.drawImage((size - art.width()) // 2 + unit, (size - art.height()) // 2, art)
     p.end()
-    if not canvas.save(str(icon), "ICO"):
+    return canvas
+
+
+def write_icns(path: Path) -> None:
+    """macOS icon file: a header, then one (type, length, PNG data) entry per size."""
+    body = b""
+    for code, size in ((b"ic07", 128), (b"ic08", 256), (b"ic09", 512)):
+        data = QtCore.QByteArray()
+        buffer = QtCore.QBuffer(data)
+        buffer.open(QtCore.QIODevice.OpenModeFlag.WriteOnly)
+        if not app_icon_image(size).save(buffer, "PNG"):
+            raise OSError("could not encode the icon")
+        png = bytes(data)
+        body += code + struct.pack(">I", len(png) + 8) + png
+    path.write_bytes(b"icns" + struct.pack(">I", len(body) + 8) + body)
+
+
+def install_shortcuts() -> list[str]:
+    """Create the 'Desktop Cat' launcher(s) with the cat icon; returns what was created."""
+    if sys.platform == "win32":
+        return _install_windows_shortcuts()
+    if sys.platform == "darwin":
+        return _install_mac_app()
+    raise OSError("shortcuts are only supported on Windows and macOS")
+
+
+def _install_windows_shortcuts() -> list[str]:
+    """desktop_cat.ico + shortcuts on the Desktop and in the Start menu (they launch with
+    pythonw, so no console window appears)."""
+    script = Path(__file__).resolve()
+    icon = script.with_name("desktop_cat.ico")
+    if not app_icon_image(256).save(str(icon), "ICO"):
         raise OSError("could not write the icon")
 
     pythonw = Path(sys.executable).with_name("pythonw.exe")
@@ -3003,6 +3093,39 @@ def install_shortcuts() -> list[str]:
     return [line for line in result.stdout.splitlines() if line.strip()]
 
 
+def build_mac_app(app: Path, python: str, script: str) -> None:
+    """A minimal .app bundle: Info.plist, the icon, and a launcher that runs the script."""
+    contents = app / "Contents"
+    (contents / "MacOS").mkdir(parents=True, exist_ok=True)
+    (contents / "Resources").mkdir(parents=True, exist_ok=True)
+    write_icns(contents / "Resources" / "desktop_cat.icns")
+    launcher = contents / "MacOS" / "DesktopCat"
+    launcher.write_text(f'#!/bin/bash\nexec "{python}" "{script}"\n', encoding="utf-8", newline="\n")
+    launcher.chmod(0o755)
+    (contents / "Info.plist").write_text("""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key><string>Desktop Cat</string>
+    <key>CFBundleDisplayName</key><string>Desktop Cat</string>
+    <key>CFBundleIdentifier</key><string>local.desktopcat.app</string>
+    <key>CFBundleExecutable</key><string>DesktopCat</string>
+    <key>CFBundleIconFile</key><string>desktop_cat</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleVersion</key><string>1.0</string>
+    <key>LSUIElement</key><true/>
+</dict>
+</plist>
+""", encoding="utf-8", newline="\n")
+
+
+def _install_mac_app() -> list[str]:
+    app = Path.home() / "Desktop" / "Desktop Cat.app"
+    build_mac_app(app, sys.executable, str(Path(__file__).resolve()))
+    subprocess.run(["touch", str(app)], check=False)  # makes Finder pick up the new icon
+    return [str(app)]
+
+
 # =================================================================================
 # Entry point
 # =================================================================================
@@ -3019,7 +3142,7 @@ def parse_args(argv: list[str]) -> tuple[Config, argparse.Namespace]:
     parser.add_argument("--lunch", metavar="HH:MM", help="lunch reminder time, 24 h (default 13:00)")
     parser.add_argument("--home", metavar="HH:MM", help="go-home reminder time, 24 h (default 17:45)")
     parser.add_argument("--install-shortcut", action="store_true",
-                        help="create Desktop + Start menu shortcuts (then right-click one > Pin to taskbar)")
+                        help="create the Desktop Cat launcher with its icon (Windows: Desktop + Start menu; macOS: Desktop app)")
     args = parser.parse_args(argv)
 
     cfg = Config.demo() if args.demo else Config()
@@ -3050,7 +3173,8 @@ def main() -> int:
     if args.install_shortcut:
         for path in install_shortcuts():
             print("Created", path)
-        print("To pin it: right-click the Desktop Cat shortcut > Show more options > Pin to taskbar.")
+        if sys.platform == "win32":
+            print("To pin it: right-click the Desktop Cat shortcut > Show more options > Pin to taskbar.")
         return 0
     if notify_running_instance():
         return 0  # already running: the existing cat says hello instead

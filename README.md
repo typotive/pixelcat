@@ -1,6 +1,6 @@
 # 🐱 Desktop Cat
 
-A lightweight pixel companion that sits atop your taskbar to encourage healthy desk habits. It **tracks desk time to prompt movement breaks**, **reminds you to hydrate, eat lunch, and log off**, **fetches local files and apps in milliseconds**, and **runs a visual cleanup animation** while clearing temporary files and the system recycle bin.
+A lightweight pixel companion that sits atop your taskbar or Dock to encourage healthy desk habits. It **tracks desk time to prompt movement breaks**, **reminds you to hydrate, eat lunch, and log off**, **fetches local files and apps in milliseconds**, and **runs a visual cleanup animation** while clearing temporary files and the system recycle bin.
 
 Single Python file · PyQt6 · no build step · 100% local processing.
 
@@ -53,25 +53,46 @@ Safety boundaries:
 ### ✨ Visual Design
 Subtle frosted glass dialogue styling, clean pixel scaling across mixed-DPI displays, and clean typographic fallbacks using system sans-serif fonts.
 
-## Requirements
-- **Windows 10 / 11** (Full feature set; Unix environments run the core pet timer with basic mouse-based idle tracking)
+## One-Click Install
+Download or clone this repository (unzip it first if needed), open the [`install`](install) folder, and double-click the file for your system:
+
+| System | File |
+|---|---|
+| Windows | `Install Desktop Cat (Windows).bat` |
+| Mac | `Install Desktop Cat (Mac).command` |
+
+The installer sets up Python if needed, installs the required packages in a private environment, creates a **Desktop Cat** icon on your Desktop, and starts the companion. It is safe to run again. See [`install/README.txt`](install/README.txt) for security prompts and uninstall steps.
+
+## Platform Support
+| Feature | Windows 10 / 11 | macOS |
+|---|---|---|
+| Companion, health nudges, animations | ✅ | ✅ |
+| File search | ✅ Fixed drives, updated live | ✅ Home folder, refreshed hourly |
+| App search | ✅ | ✅ |
+| Storage cleanup | ✅ | ❌ Finds nothing to clean; not available yet |
+| Dialogue styling | Frosted glass | Plain dark tint |
+
+macOS support has not yet been tested on a real Mac. Please open an issue if something misbehaves.
+
+## Requirements (Manual Install)
+- **Windows 10 / 11 or macOS**
 - **Python 3.10+**
 - **PyQt6** (or PySide6)
 
-## Installation & Setup
+## Manual Installation
 ```bash
-git clone https://github.com/typotive/poocha.ser_assistant.git
-cd poocha.ser_assistant
+git clone https://github.com/typotive/poochaser_assistant.git
+cd poochaser_assistant
 pip install -r requirements.txt
 python desktop_cat.py
 ```
 
 **Generate Shortcuts:**
-Run once to create application shortcuts on your Desktop and Start menu with headless execution (`pythonw`):
+Run once to create the launcher with its icon (Windows: Desktop and Start menu; macOS: an app on the Desktop). No console window appears:
 ```bash
 python desktop_cat.py --install-shortcut
 ```
-You can then pin the generated shortcut to your taskbar. Running a second instance focuses the active companion rather than launching duplicates.
+You can then pin it to your taskbar or Dock. Running a second instance focuses the active companion rather than launching duplicates.
 
 **Quick Demo:**
 ```bash
@@ -102,12 +123,13 @@ All options can be defined within the `Config` dataclass in `desktop_cat.py` or 
 | `cobra_min_age_h` | 24 hours | Age cutoff for temporary file cleanup |
 
 ## Data & Privacy
-All computation occurs locally on your machine. No telemetry, usage statistics, or personal data are collected or transmitted over the network. The local search index is stored exclusively within `%LOCALAPPDATA%\DesktopCat\` and can be purged at any time.
+All computation occurs locally on your machine. No telemetry, usage statistics, or personal data are collected or transmitted over the network. The local search index is stored exclusively within `%LOCALAPPDATA%\DesktopCat\` (macOS: `~/Library/Application Support/DesktopCat/`) and can be purged at any time.
 
 ## Project Structure
 ```
 desktop_cat.py        Application source and logic
 desktop_cat.ico       Application icon asset
+install/              One-click installers for Windows and macOS
 requirements.txt      Runtime dependencies
 docs/screenshots/     Visual documentation assets
 CLAUDE.md             Architecture reference, implementation notes, and testing guidelines
