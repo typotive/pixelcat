@@ -100,7 +100,7 @@ Tested only by simulation on Windows (`os.sep = "/"` before import, patched `sys
 Newest first. **Every change to the app gets a line here, and the sections above are kept current.**
 
 **2026-11-05**
-- Public-repo cleanup: third-party product names removed from the README, notes and code comments; dropped an unneeded font fallback; search screenshot re-rendered with generic icons (no other companies' logos). Built on the owner's README rewrite; fixed its clone link.
+- Public-repo cleanup: third-party product names removed from the README, notes and code comments; dropped an unneeded font fallback; search screenshot re-rendered with generic icons (no other companies' logos). Built on the owner's README rewrite. The repo is now typotive/poocha.ser_assistant.
 - One-click installers in `install/` for Windows and Mac (dependencies in a private venv, Desktop icon, auto-start), plus `.gitattributes`. Windows run end to end; Mac checked by simulation and syntax only.
 - Mac support in the app: `SEP` paths, `app_data_dir`, Mac idle detection, tool windows stay visible, no screen capture, Finder reveal, Applications list, `.app` + `.icns` builder. Cobra's Windows folders are now Windows-only. Icon recentred (`app_icon_image`).
 
