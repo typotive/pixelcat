@@ -1,4 +1,4 @@
-# 🐱 Desktop Cat
+# 🐱 Desktop Pet
 
 A lightweight pixel companion that sits atop your taskbar or Dock to encourage healthy desk habits. It **tracks desk time to prompt movement breaks**, **reminds you to hydrate, eat lunch, and log off**, **fetches local files and apps in milliseconds**, and **runs a visual cleanup animation** while clearing temporary files and the system recycle bin.
 
