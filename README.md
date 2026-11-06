@@ -91,8 +91,8 @@ macOS support has not yet been tested on a real Mac. Please open an issue if som
 
 ## Manual Installation
 ```bash
-git clone https://github.com/typotive/poocha.ser_assistant.git
-cd poocha.ser_assistant
+git clone https://github.com/typotive/pixelcat.git
+cd pixelcat
 pip install -r requirements.txt
 python desktop_cat.py
 ```

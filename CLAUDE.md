@@ -109,6 +109,7 @@ Tested only by simulation on Windows (`os.sep = "/"` before import, patched `sys
 Newest first. **Every change to the app gets a line here, and the sections above are kept current.**
 
 **2026-11-06**
+- The repo is now typotive/pixelcat; README clone link updated.
 - Settings window (⚙ in the double-click bubble and the right-click menu), saved to `settings.json`: pet, size, sitting limit on/off and minutes.
 - Routines are now an editable list: add, edit, delete, on/off, set time or every N minutes, per-routine days, "Try it", Restore defaults. Replaces the fixed `ROUTINE` table; `tracker.water_s` became `active_s`.
 - Five new pets (golden retriever, hamster, bunny, penguin, caped hero), each with its own sounds and small talk. Five sizes, Tiny to Huge.
