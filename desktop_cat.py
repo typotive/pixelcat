@@ -132,19 +132,25 @@ def _default_exclude_paths() -> tuple[str, ...]:
 class Config:
     # --- Health timers (seconds) ---
     alert_after_s: int = 40 * 60       # max continuous sitting (screen time) before "get up and walk"
+    walk_on: bool = True               # False = no sitting reminder at all (Settings > Routines)
     idle_threshold_s: int = 5 * 60     # no input for this long = user is away
     idle_policy: str = "reset"         # "reset": away resets session; "pause": away only pauses it
     snooze_s: int = 5 * 60             # "x" on the alert bubble hides it for this long
     alert_rotate_s: int = 45           # pick a new reminder text this often while alerting
 
-    # --- Daily routine ---
+    # --- Daily routine (first-run defaults; after that, settings.json holds the list) ---
     water_every_s: int = 30 * 60       # "sip of water" after this much screen time (pauses while away)
-    water_later_s: int = 10 * 60       # "Later" on the water bubble asks again after this
+    water_later_s: int = 10 * 60       # "Later" on an every-N-minutes bubble asks again after this
     lunch_time: str = "13:00"          # 24 h clock
     home_time: str = "17:45"
-    clock_later_s: int = 10 * 60       # "10 more min" on the lunch / home bubbles
+    clock_later_s: int = 10 * 60       # "10 more min" on a set-time bubble
     clock_window_min: int = 90         # if you're away at that time, it still shows when you return within this
     routine_days: tuple[int, ...] = (0, 1, 2, 3, 4, 5, 6)  # Mon=0 ... Sun=6; drop days you don't work
+
+    # --- Saved settings ---
+    pet: str = "cat"                   # a key of PETS
+    settings_path: str = ""            # empty = settings.json in the app data folder
+    overrides: tuple[str, ...] = ()    # settings fixed by command-line flags; nothing is saved while any are set
 
     # --- Timer intervals (milliseconds) ---
     tracker_interval_ms: int = 1000    # how often activity is polled
@@ -198,25 +204,61 @@ WALK_REMINDERS = [
     "🚶 Stretch your legs. The screen will still be here in five minutes.",
 ]
 
-# Daily routine bubbles: title, body ({time} = scheduled time), buttons (key, label).
-ROUTINE = {
-    "water": ("💧 Sip of water", "Another {every} minutes on screen. Have a few sips.",
-              [("water_ok", "Done 💧"), ("water_later", "Later")]),
-    "lunch": ("🍱 Lunch break!", "It's {time}. Step away from the screen and eat something proper.",
-              [("lunch_ok", "Going 🍱"), ("lunch_later", "10 more min")]),
-    "home": ("🏠 Let's go home!", "It's {time}. Save your work and head out.",
-             [("home_ok", "Heading out 👋"), ("home_later", "10 more min")]),
-}
-ROUTINE_REPLIES = {
-    "water_ok": "Good human. 💧",
-    "lunch_ok": "Enjoy your lunch! 🍱 I'll guard the desk.",
-    "home_ok": "See you tomorrow! 👋🐾",
-}
+DAY_NAMES = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+
+def default_routines(cfg: "Config") -> list[dict]:
+    """The starting routine list. kind "every" = after N minutes of screen time; kind
+    "time" = once a day at a clock time. {every} and {time} in a message fill themselves in."""
+    days = list(cfg.routine_days)
+    return [
+        {"id": "water", "title": "💧 Sip of water", "message": "Another {every} on screen. Have a few sips.",
+         "kind": "every", "minutes": cfg.water_every_s / 60, "time": "09:00", "days": days, "on": True,
+         "ok": "Done 💧", "reply": "Good human. 💧"},
+        {"id": "lunch", "title": "🍱 Lunch break!",
+         "message": "It's {time}. Step away from the screen and eat something proper.",
+         "kind": "time", "minutes": 30, "time": cfg.lunch_time, "days": days, "on": True,
+         "ok": "Going 🍱", "reply": "Enjoy your lunch! 🍱 I'll guard the desk."},
+        {"id": "home", "title": "🏠 Let's go home!", "message": "It's {time}. Save your work and head out.",
+         "kind": "time", "minutes": 30, "time": cfg.home_time, "days": days, "on": True,
+         "ok": "Heading out 👋", "reply": "See you tomorrow! 👋🐾"},
+    ]
+
+
+def clean_routine(raw) -> dict | None:
+    """A routine read from settings.json with every field checked, or None if it's unusable."""
+    try:
+        kind = raw["kind"]
+        hhmm = str(raw.get("time") or "09:00")
+        fmt_clock(hhmm)  # raises ValueError on a bad time
+        minutes = float(raw.get("minutes") or 30)
+        days = sorted({int(d) for d in raw.get("days", range(7)) if 0 <= int(d) <= 6})
+        if kind not in ("every", "time") or not str(raw["id"]) or not str(raw["title"]).strip() or minutes <= 0:
+            return None
+        return {"id": str(raw["id"]), "title": str(raw["title"]), "message": str(raw.get("message", "")),
+                "kind": kind, "minutes": minutes, "time": hhmm, "days": days, "on": bool(raw.get("on", True)),
+                "ok": str(raw.get("ok") or "Done ✅"), "reply": str(raw.get("reply") or "Nice work! 🐾")}
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def routine_when(routine: dict) -> str:
+    """'every 30 min' or '1:00 pm', plus the days unless it runs every day."""
+    if routine["kind"] == "every":
+        when = f"every {fmt_span(routine['minutes'] * 60)}"
+    else:
+        when = fmt_clock(routine["time"])
+    days = routine["days"]
+    if len(days) == 7:
+        return when
+    if days == [0, 1, 2, 3, 4]:
+        return f"{when}, Mon–Fri"
+    if days == [5, 6]:
+        return f"{when}, weekends"
+    return f"{when}, {' '.join(DAY_NAMES[d] for d in days)}"
+
 
 CHATTER = [
-    "Mrrp.",
-    "*stretches*",
-    "Purr... 💤",
     "I'm keeping an eye on your screen time. 👀",
     "Don't forget to blink!",
     "Double-click me and I'll fetch a file for you. 🐾",
@@ -354,7 +396,7 @@ class ActivityTracker(QtCore.QObject):
         self.cfg = cfg
         self.detector = IdleDetector()
         self.session_s = 0.0             # continuous active time
-        self.water_s = 0.0               # active time since the last water reminder (not reset by breaks)
+        self.active_s = 0.0              # total active time, never reset (drives every-N-minutes routines)
         self.away = False
         self.alert_active = False
         self._last_poll = time.monotonic()
@@ -391,8 +433,8 @@ class ActivityTracker(QtCore.QObject):
                 self.away = False
                 self.user_returned.emit()
             self.session_s += dt
-            self.water_s += dt
-            if not self.alert_active and self.session_s >= self.cfg.alert_after_s:
+            self.active_s += dt
+            if self.cfg.walk_on and not self.alert_active and self.session_s >= self.cfg.alert_after_s:
                 self.alert_active = True
                 self.alert_triggered.emit()
 
@@ -404,9 +446,11 @@ class ActivityTracker(QtCore.QObject):
         self.alert_active = False
 
     def force_alert(self) -> None:
-        """Debug helper: jump the session to the alert threshold."""
+        """Preview: jump the session to the alert threshold (works even with the reminder off)."""
         self.session_s = max(self.session_s, float(self.cfg.alert_after_s))
-        self.poll()
+        if not self.alert_active:
+            self.alert_active = True
+            self.alert_triggered.emit()
 
 
 # =================================================================================
@@ -1329,6 +1373,8 @@ ANIMATIONS = {
     "sleep": ["sleep"],
     "alert": ["alert"],
     "smash": ["smash_up", "smash_up", "smash_down", "smash_down"],
+    "zip": ["smash_up"],           # stunt: arm up, firing and riding the grapple line
+    "fly": ["fly_a", "fly_b"],     # stunt: only pets with stunts=True have these frames
 }
 
 # --- Cobra (Cobra mode opponent) ---------------------------------------------------
@@ -1378,6 +1424,303 @@ COBRA_ART = {
 COBRA_DEAD_EYES = ((2.0, 8.9), (4.2, 8.9))  # art cell centres of the eyes on the "dead" frame
 
 
+# --- The pets --------------------------------------------------------------------------
+@dataclass
+class PetKind:
+    key: str
+    label: str
+    art: dict[str, list[str]]            # every frame the same size, facing right
+    palette: dict[str, str]
+    head_col: float                      # where "!" and "z" float (art column + 1 padding cell)
+    mouth: tuple[float, float]           # where a fetched item is held (column, row, + 1 padding cell)
+    hello: str                           # opens the "What should I do?" question
+    pet_line: str                        # said when clicked
+    chatter: tuple[str, ...]             # this pet's own small talk
+    stunts: bool = False                 # has fly_a / fly_b frames and does the grapple-and-fly stunt
+
+
+def _feet(starts: tuple[int, ...], width: int, parts: tuple[str, ...]) -> list[str]:
+    """Leg rows: one row per entry of `parts`, repeated at each start column."""
+    rows = []
+    for part in parts:
+        row = ["."] * width
+        for s in starts:
+            row[s:s + len(part)] = part
+        rows.append("".join(row))
+    return rows
+
+
+def _build_art(body: list[str], legs: dict[str, tuple[int, ...]], parts: tuple[str, ...],
+               blink: dict[int, str], alert: dict[int, str], sleep: list[str],
+               smash_up: dict[int, tuple[int, str]], smash_down: dict[int, tuple[int, str]],
+               spare: int = 2) -> dict[str, list[str]]:
+    """All the frames of a pet from its body, legs and a few replaced rows. `spare` empty
+    columns on the right give the smashing paw room, as on the cat."""
+    width = len(body[0])
+    stand = _feet(legs["stand"], width, parts)
+    frames = {
+        "stand": body + stand,
+        "blink": _replace(body, blink) + stand,
+        "walk_a": body + _feet(legs["walk_a"], width, parts),
+        "walk_b": body + _feet(legs["walk_b"], width, parts),
+        "alert": _replace(body, alert) + stand,
+        "sleep": ["." * width] * (len(body) + len(parts) - len(sleep)) + sleep,
+    }
+    frames = {name: [row + "." * spare for row in rows] for name, rows in frames.items()}
+    smash_base = [row + "." * spare for row in body + _feet(legs["smash"], width, parts)]
+    frames["smash_up"] = _patch(smash_base, smash_up)
+    frames["smash_down"] = _patch(smash_base, smash_down)
+    return frames
+
+
+_RETRIEVER_BODY = [
+    "..............KKKKK...",
+    ".............KOOOOOK..",
+    "...........KKDOOOOOOK.",
+    "..KK......KDDDOOEHOOK.",
+    ".KOOK.....KDDDOOEEOOOK",
+    ".KOOOK....KDDDOOOOOWNK",
+    "..KOOOK....KDDOOOWWWWK",
+    "...KOOK....KDDOOOKKKK.",
+    "...KOOOKKKKKKOOOOPPK..",
+    "....KOOOOOOOOOOWWKK...",
+    "....KOOOOOOOOOOWWWK...",
+    "....KOOOOOOOOOOOWWK...",
+    "....KDOOOOOOOOOOOOK...",
+    "....KDDOOOOOOOOOOOK...",
+]
+_RETRIEVER = _build_art(
+    _RETRIEVER_BODY,
+    {"stand": (5, 8, 13, 16), "walk_a": (4, 8, 12, 17), "walk_b": (6, 7, 14, 15), "smash": (5, 8, 13)},
+    ("KOK", "KWK", "KKK"),
+    blink={3: "..KK......KDDDOOOOOOK.", 4: ".KOOK.....KDDDOOKKOOOK"},
+    alert={2: "...........KKDOOEHOOK.", 3: "..KK......KDDDOOEEOOK.", 4: ".KOOK.....KDDDOOOOOOOK"},
+    sleep=[
+        "...............KKKKK..",
+        "..KK..........KDDOOOK.",
+        ".KOOKKKKKKKKKKKDDOOOOK",
+        ".KOOOOOOOOOOOOKDDKKOWK",
+        "..KOOOOOOOOOOOKDOOOWNK",
+        "..KDOOOOOOOOOOOOKKKKK.",
+        "..KDDOOOOOOOOOOOOOOWK.",
+        "...KKKKKKKKKKKKKKKKKK.",
+    ],
+    smash_up={0: (21, "KKK"), 1: (21, "KWK"), 2: (22, "OK"), 3: (22, "OK"), 4: (22, "OK"), 5: (22, "OK"), 6: (22, "KK")},
+    smash_down={12: (19, "K"), 13: (19, "OK"), 14: (18, "KOOK"), 15: (18, "KWWK"), 16: (18, "KKKK")},
+)
+
+_HAMSTER_BODY = [
+    ".....KK...KK..",
+    "....KPPK.KPPK.",
+    "...KOOOKKKOOOK",
+    "..KOOOOOOOOOOK",
+    ".KOOOOOOOEHOOK",
+    ".KDOOOOOOEEOOK",
+    "KOOOOOOOWWWWWK",
+    "KODOOOOWWWPPWK",
+    "KODOOOWWWWWWWK",
+    "KOOOOOWWWWWWK.",
+    ".KOOOOWWWWWK..",
+]
+_HAMSTER = _build_art(
+    _HAMSTER_BODY,
+    {"stand": (3, 6, 9), "walk_a": (2, 6, 10), "walk_b": (4, 5, 8), "smash": (3, 6)},
+    ("KPK", "KKK"),
+    blink={4: ".KOOOOOOOOOOOK", 5: ".KDOOOOOOKKOOK"},
+    alert={3: "..KOOOOOOEHOOK", 4: ".KOOOOOOOEEOOK", 5: ".KDOOOOOOOOOOK"},
+    sleep=[
+        "....KPK.KPK...",
+        "...KKKKKKKKK..",
+        "..KOOOOOOOOOK.",
+        ".KOOODOOOKKOOK",
+        ".KOOODOOOOOOPK",
+        ".KOOOOOOWWWWWK",
+        "..KKKKKKKKKKK.",
+    ],
+    smash_up={1: (14, "KK"), 2: (14, "PK"), 3: (14, "OK"), 4: (14, "OK"), 5: (14, "OK"), 6: (14, "KK")},
+    smash_down={9: (13, "K"), 10: (12, "KOOK"), 11: (12, "KPPK"), 12: (12, "KKKK")},
+)
+
+_BUNNY_BODY = [
+    "...........K..K...",
+    "..........KPKKPK..",
+    "..........KPKKPK..",
+    "..........KPKKPK..",
+    "..........KPKKPK..",
+    "..........KOKKOK..",
+    ".........KOOOOOOK.",
+    "........KOOOOEHOOK",
+    "........KOOOOEEOOK",
+    "........KOOOOOOWPK",
+    ".........KOOOWWWWK",
+    "...KKKKKKKKOOWWKK.",
+    "..KOOOOOOOOOOWWK..",
+    "KKKOOOOOOOOOOOWK..",
+    "KWWKOOOOOOOOOOWK..",
+    "KWWKDOOOOOOOOOOK..",
+    ".KKKDDOOOOOOOOOK..",
+]
+_BUNNY = _build_art(
+    _BUNNY_BODY,
+    {"stand": (5, 9, 12), "walk_a": (4, 9, 13), "walk_b": (6, 8, 11), "smash": (5, 9)},
+    ("KWK", "KKK"),
+    blink={7: "........KOOOOOOOOK", 8: "........KOOOOKKOOK"},
+    alert={6: ".........KOOOEHOOK", 7: "........KOOOOEEOOK", 8: "........KOOOOOOOOK"},
+    sleep=[
+        "............KKKK..",
+        "..........KKPPPPK.",
+        "..KKKKKKKKKOKKKK..",
+        ".KOOOOOOOOKOOOOOK.",
+        "KWKOOOOOOKOOKKOOOK",
+        "KWKOOOOOOOKOOOOWPK",
+        ".KKDOOOOOOOOKWWWK.",
+        "...KDDOOOOOOOOOK..",
+        "....KKKKKKKKKKKK..",
+    ],
+    smash_up={5: (18, "KK"), 6: (18, "WK"), 7: (18, "OK"), 8: (18, "OK"), 9: (18, "OK"), 10: (18, "KK")},
+    smash_down={16: (15, "K"), 17: (15, "KOOK"), 18: (15, "KKKK")},
+)
+
+_PENGUIN_BODY = [
+    ".....KKKKKK.....",
+    "....KOOOOOOK....",
+    "...KOOOOOOOOK...",
+    "...KOOOOWEHOK...",
+    "...KOOOOWEEOK...",
+    "...KOOOOWWWAAAK.",
+    "...KOOOOWWWKKK..",
+    "..KKOOOOWWWWK...",
+    ".KOKOOOWWWWWK...",
+    ".KOKOOOWWWWWK...",
+    ".KOKOOOWWWWWK...",
+    "..KKOOOWWWWWK...",
+    "...KOOOWWWWWK...",
+    "...KOOOWWWWWK...",
+    "...KDOOOWWWK....",
+    "....KKKKKKKK....",
+]
+_PENGUIN = _build_art(
+    _PENGUIN_BODY,
+    {"stand": (4, 8), "walk_a": (3, 9), "walk_b": (5, 7), "smash": (4, 8)},
+    ("KAAK", "KKKK"),
+    blink={3: "...KOOOOWWWOK...", 4: "...KOOOOWKKOK..."},
+    alert={2: "...KOOOOWEHOK...", 3: "...KOOOOWEEOK...", 4: "...KOOOOWWWOK..."},
+    sleep=[
+        ".....KKKKKK.....",
+        "....KOOOOOOK....",
+        "...KOOOOOOOOK...",
+        "...KOOOOWWWOK...",
+        "...KOOOOWKKOK...",
+        "...KOOOOWWWAAAK.",
+        "...KOOOOWWWKKK..",
+        "..KKOOOOWWWWK...",
+        ".KOKOOOWWWWWK...",
+        ".KOKOOOWWWWWK...",
+        "..KKOOOWWWWWK...",
+        "...KDOOOWWWK....",
+        "...KKKKKKKKKK...",
+        "..KAAAAKKAAAAK..",
+        "...KKKK..KKKK...",
+    ],
+    smash_up={1: (15, "KKK"), 2: (15, "KOK"), 3: (15, "KOK"), 4: (15, "KOK"), 5: (15, "KOK"), 6: (15, "KOK"),
+              7: (13, "OOOOK"), 8: (13, "KKKKK")},
+    smash_down={9: (12, "KKKKK"), 10: (12, "OOOOK"), 11: (12, "KKKKK")},
+)
+
+_HERO_BODY = [
+    ".....KKKKKK.....",
+    "....KMMMMMMK....",
+    "...KMMMMMMMMK...",
+    "...KMMMHEMHEK...",
+    "...KMMMHEMHEK...",
+    "...KSSSSSSSSK...",
+    "...KSSSSSKKSK...",
+    "....KKKKKKKK....",
+    "..KCKOOOOOOK....",
+    ".KCCKOOYYOOOK...",
+    ".KCCKOOYYOOKOK..",
+    "KCCCKOOOOOOKOK..",
+    "KCCCKYYYYYYKSK..",
+    "KCCCKOOOOOOKKK..",
+    "KCCCCKOOKOOK....",
+]
+_HERO = _build_art(
+    _HERO_BODY,
+    {"stand": (6, 9), "walk_a": (4, 11), "walk_b": (7, 8), "smash": (6, 9)},
+    ("KOK", "KMK", "KKK"),
+    blink={3: "...KMMMMMMMMK...", 4: "...KMMMKKMKKK..."},
+    alert={2: "...KMMMHEMHEK...", 3: "...KMMMHEMHEK...", 4: "...KMMMMMMMMK..."},
+    sleep=[
+        "..........KKKKK.",
+        ".........KMMMMMK",
+        "...KKKKKKKMKKMMK",
+        "..KCCCCCCCKMMMMK",
+        ".KCCCCCCCCKSSKSK",
+        ".KCCCCCCCCCKSSK.",
+        "..KKKKKKKKKKKK..",
+    ],
+    smash_up={0: (14, "KKKK"), 1: (14, "KSSK"), 2: (15, "OK"), 3: (15, "OK"), 4: (15, "OK"), 5: (15, "OK"),
+              6: (15, "OK"), 7: (14, "KOK"), 8: (12, "KOOK"), 10: (11, "O..."), 11: (11, "O..."), 12: (11, "Y..."),
+              9: (12, "OOOK"), 13: (11, "O...")},
+    smash_down={10: (11, "KKKKKKK"), 11: (11, "OOOOSSK"), 12: (11, "KKKKKKK"), 13: (11, "O...")},
+)
+# Flying level, one arm out in front, the cape flapping behind (the hero's stunt).
+_HERO_FLY_LEGS = [
+    "...KKOOYYOOOOOOSSK",
+    "..KMMOOOOOOKKKKKK.",
+    "..KMKKKKKKKK......",
+    "...K..............",
+    "..................",
+    "..................",
+    "..................",
+]
+_HERO["fly_a"] = ["." * 18] * 5 + [
+    "...........KKKKK..",
+    "..........KMMMMMK.",
+    "KKK.......KMMHEHEK",
+    "KCCKKKKKKKKSSSSSSK",
+    ".KCCCCKOOOOKSSSKSK",
+    "..KKCCKYYOOOKKKKK.",
+] + _HERO_FLY_LEGS
+_HERO["fly_b"] = ["." * 18] * 5 + [
+    "...........KKKKK..",
+    "..........KMMMMMK.",
+    "..........KMMHEHEK",
+    ".KKKKKKKKKKSSSSSSK",
+    "KCCCCCCKOOOKSSSKSK",
+    ".KKCCCKYYOOOKKKKK.",
+] + _HERO_FLY_LEGS
+
+PETS = {
+    "cat": PetKind("cat", "Tabby cat", SPRITE_ART, PALETTE, 16.5, (20.5, 8.5), "Meow?", "Purr ♥",
+                   ("Mrrp.", "*stretches*", "Purr... 💤")),
+    "retriever": PetKind("retriever", "Golden retriever", _RETRIEVER, {
+        "K": "#4a2f17", "O": "#ecb860", "D": "#c98a35", "W": "#fdeecb", "P": "#ff8fa3",
+        "N": "#2b1d14", "E": "#1e2630", "H": "#ffffff"}, 17.5, (23.5, 9.5), "Woof?", "*wags tail* ♥",
+        ("Woof!", "*wags tail*", "Did someone say ball? 🎾")),
+    "hamster": PetKind("hamster", "Hamster", _HAMSTER, {
+        "K": "#4a2f1c", "O": "#e8a860", "D": "#c9853f", "W": "#fff1d6", "P": "#ffa6b5",
+        "E": "#1e2630", "H": "#ffffff"}, 10.5, (16.5, 9.5), "Squeak?", "Squeak ♥",
+        ("Squeak!", "*stuffs cheeks*", "*runs on an invisible wheel*")),
+    "bunny": PetKind("bunny", "Bunny", _BUNNY, {
+        "K": "#5a4a52", "O": "#f4f0ea", "D": "#d3ccc1", "W": "#ffffff", "P": "#ffa6b5",
+        "E": "#2a2230", "H": "#ffffff"}, 14.5, (20.0, 10.5), "Thump thump?", "*nose twitch* ♥",
+        ("*nibbles*", "*happy hop*", "*twitches nose*")),
+    "penguin": PetKind("penguin", "Penguin", _PENGUIN, {
+        "K": "#141a24", "O": "#34465f", "D": "#222f42", "W": "#fbfbf7", "A": "#f5a524",
+        "E": "#141a24", "H": "#ffffff"}, 11.5, (17.5, 7.5), "Honk?", "Honk ♥",
+        ("Honk!", "*slides on belly*", "Is it cold in here? I hope so. 🧊")),
+    "hero": PetKind("hero", "Caped hero", _HERO, {
+        "K": "#1a2430", "O": "#1fa2a8", "M": "#0f3e52", "C": "#f2b134", "Y": "#ffd95e",
+        "S": "#f6cfa6", "E": "#1a2430", "H": "#ffffff"}, 9.5, (17.0, 13.5), "Citizen!", "Stay strong ♥",
+        ("*cape flutters*", "Justice never sleeps. You should, though.", "Your posture needs saving. 🦸"),
+        stunts=True),
+}
+
+# Pet size choices: (name, sprite pixel size).
+SIZES = (("Tiny", 3), ("Small", 4), ("Medium", 5), ("Large", 7), ("Huge", 10))
+
+
 def render_art(rows: list[str], unit: int, palette: dict[str, str]) -> QtGui.QImage:
     """String art -> image, each art pixel a unit x unit block, with one empty cell of
     padding on every side."""
@@ -1402,11 +1745,12 @@ class SpriteSheet:
     getting uneven, smeared pixels.
     """
 
-    def __init__(self, scale: int, dpr: float) -> None:
+    def __init__(self, scale: int, dpr: float, kind: PetKind | None = None) -> None:
         self.dpr = dpr
         self.unit = max(1, round(scale * dpr))
+        self.kind = kind or PETS["cat"]
         self.frames: dict[str, dict[int, QtGui.QPixmap]] = {}
-        for name, rows in SPRITE_ART.items():
+        for name, rows in self.kind.art.items():
             img = self._render(name, rows)
             mirrored = img.transformed(QtGui.QTransform().scale(-1, 1))
             self.frames[name] = {1: self._to_pixmap(img), -1: self._to_pixmap(mirrored)}
@@ -1419,7 +1763,7 @@ class SpriteSheet:
         return pix
 
     def _render(self, name: str, rows: list[str]) -> QtGui.QImage:
-        return render_art(rows, self.unit, PALETTE)
+        return render_art(rows, self.unit, self.kind.palette)
 
     def frame_name(self, animation: str, index: int) -> str:
         cycle = ANIMATIONS[animation]
@@ -1451,6 +1795,8 @@ class PetState:
     ALERT = "alert"
     SMASH = "smash"
     RUN = "run"          # fetch trip: fast walk cycle
+    ZIP = "zip"          # stunt: firing and riding the grapple line
+    FLY = "fly"          # stunt: flying
 
 
 PET_WINDOW_FLAGS = (
@@ -1461,6 +1807,38 @@ PET_WINDOW_FLAGS = (
 )
 
 
+class GrappleLine(QtWidgets.QWidget):
+    """The hero's golden grapple line: a click-through window just big enough for the line."""
+
+    PAD = 5
+
+    def __init__(self) -> None:
+        super().__init__(None, PET_WINDOW_FLAGS)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._a = self._b = QtCore.QPoint()
+
+    def stretch(self, a: QtCore.QPoint, b: QtCore.QPoint) -> None:
+        box = QtCore.QRect(a, b).normalized().adjusted(-self.PAD, -self.PAD, self.PAD, self.PAD)
+        self._a, self._b = a - box.topLeft(), b - box.topLeft()
+        self.setGeometry(box)
+        if not self.isVisible():
+            self.show()
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        p.setPen(QtGui.QPen(QtGui.QColor("#ffd95e"), 2.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawLine(self._a, self._b)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QtGui.QColor("#fff3b8"))
+        p.drawEllipse(QtCore.QPointF(self._b), 4, 4)  # the hook at the far end
+        p.end()
+
+
 class CatWindow(QtWidgets.QWidget):
     clicked = Signal()
     double_clicked = Signal()
@@ -1468,9 +1846,14 @@ class CatWindow(QtWidgets.QWidget):
     context_menu_requested = Signal(QtCore.QPoint)
     paw_down = Signal()  # the smashing paw just hit the ground (Cobra mode)
     trip_done = Signal()  # back home from a fetch trip, carrying the item
+    stunt_wanted = Signal()  # a pet with stunts feels like showing off
+    stunt_done = Signal()    # landed back where the stunt began
 
     TOP_MARGIN = 40     # room above the sprite for "!" and "z" overlays
     GROUND = 6          # room below the sprite for its soft ground shadow
+    STUNT_CHANCE = 0.05          # per wander decision, about one stunt every couple of minutes
+    SHOOT_S, ZIP_S, DIVE_S = 0.3, 0.6, 0.9
+    FLY_PX_PER_S = 700
 
     def __init__(self, sprites: SpriteSheet, cfg: Config, ui_font: UIFont) -> None:
         super().__init__(None, PET_WINDOW_FLAGS)
@@ -1501,6 +1884,13 @@ class CatWindow(QtWidgets.QWidget):
         self._trip_item: QtGui.QPixmap | None = None
         self.carrying: QtGui.QPixmap | None = None  # drawn in the cat's mouth
 
+        # Stunt state (see start_stunt).
+        self._stunt_phase = None           # "shoot", "zip", "fly", "dive" or None
+        self._stunt_t0 = 0.0
+        self._stunt_home = self._stunt_top = self._stunt_far = QtCore.QPoint()
+        self._stunt_anchor = QtCore.QPoint()
+        self._line: GrappleLine | None = None
+
         # Movement tick: moves the window while walking.
         self._move_timer = QtCore.QTimer(self)
         self._move_timer.setInterval(cfg.move_interval_ms)
@@ -1524,6 +1914,17 @@ class CatWindow(QtWidgets.QWidget):
         self._click_timer.timeout.connect(self.clicked.emit)
 
     # --- lifecycle -----------------------------------------------------------------
+    def set_sprites(self, sprites: SpriteSheet) -> None:
+        """Swap the pet or its size, keeping its feet on the ground and its centre in place."""
+        old = self.geometry()
+        self.sprites = sprites
+        self.setFixedSize(sprites.size.width() + 16, sprites.size.height() + self.TOP_MARGIN + self.GROUND)
+        avail = self._screen_geometry()
+        x = old.center().x() - self.width() // 2
+        self.move(max(avail.left(), min(x, avail.right() - self.width())), old.bottom() - self.height() + 1)
+        self.moved.emit(self.geometry())
+        self.update()
+
     def start(self) -> None:
         avail = QtGui.QGuiApplication.primaryScreen().availableGeometry()
         x = random.randint(avail.left(), max(avail.left(), avail.right() - self.width()))
@@ -1536,9 +1937,13 @@ class CatWindow(QtWidgets.QWidget):
     # --- state machine -------------------------------------------------------------
     def set_mode(self, mode: str | None) -> None:
         """Lock the cat into alert/away/fetch behaviour, or release it (None) to wander."""
+        if mode != "stunt":
+            self._cancel_stunt()  # anything else that needs the pet brings it straight home
         self.mode = mode
         self._behaviour_timer.stop()
-        if mode == "alert":
+        if mode == "stunt":
+            self._set_state(PetState.ZIP)
+        elif mode == "alert":
             self._set_state(PetState.ALERT)
         elif mode == "away":
             self._set_state(PetState.SLEEP)
@@ -1555,7 +1960,81 @@ class CatWindow(QtWidgets.QWidget):
     @property
     def busy(self) -> bool:
         """Doing a task for the user (fetching, Cobra mode)."""
-        return self.mode in ("fetch", "busy", "smash", "trip")
+        return self.mode in ("fetch", "busy", "smash", "trip", "stunt")
+
+    # --- stunt: fire a grapple line, zip to the top of the screen, fly, dive home ------
+    def start_stunt(self) -> None:
+        avail = self._screen_geometry()
+        room_right = avail.right() - self.geometry().right()
+        room_left = self.x() - avail.left()
+        self.facing = 1 if room_right >= room_left else -1
+        self._stunt_home = self.pos()
+        top_x = self.x() + self.facing * min(260, max(room_right, room_left))
+        self._stunt_top = QtCore.QPoint(top_x, avail.top())
+        self._stunt_far = QtCore.QPoint(avail.right() - self.width() if self.facing == 1 else avail.left(), avail.top())
+        self._stunt_anchor = QtCore.QPoint(top_x + self.width() // 2, avail.top())
+        if self._line is None:
+            self._line = GrappleLine()
+        self.set_mode("stunt")
+        self._stunt_phase, self._stunt_t0 = "shoot", time.monotonic()
+
+    def _hand_point(self) -> QtCore.QPoint:
+        """The raised fist on the smash_up frame, in screen coordinates."""
+        w, h = self.sprites.size.width(), self.sprites.size.height()
+        cells = len(self.sprites.kind.art["stand"][0]) + 2
+        cell = w / cells
+        left = (self.width() - w) / 2
+        col = 17 if self.facing == 1 else cells - 17
+        return self.pos() + QtCore.QPoint(round(left + cell * col), round(self.height() - self.GROUND - h + cell * 2))
+
+    def _stunt_tick(self) -> None:
+        def lerp(a: QtCore.QPoint, b: QtCore.QPoint, kx: float, ky: float) -> QtCore.QPoint:
+            return QtCore.QPoint(round(a.x() + (b.x() - a.x()) * kx), round(a.y() + (b.y() - a.y()) * ky))
+
+        def smooth(k: float) -> float:
+            return k * k * (3 - 2 * k)
+
+        now = time.monotonic()
+        t = now - self._stunt_t0
+        if self._stunt_phase == "shoot":
+            k = min(1.0, t / self.SHOOT_S)
+            hand = self._hand_point()
+            self._line.stretch(hand, lerp(hand, self._stunt_anchor, k, k))
+            if k >= 1.0:
+                self._stunt_phase, self._stunt_t0 = "zip", now
+        elif self._stunt_phase == "zip":
+            k = min(1.0, t / self.ZIP_S)
+            self.move(lerp(self._stunt_home, self._stunt_top, smooth(k), smooth(k)))
+            self._line.stretch(self._hand_point(), self._stunt_anchor)
+            if k >= 1.0:
+                self._line.hide()
+                self._set_state(PetState.FLY)
+                self._stunt_phase, self._stunt_t0 = "fly", now
+        elif self._stunt_phase == "fly":
+            dist = abs(self._stunt_far.x() - self._stunt_top.x())
+            k = min(1.0, t * self.FLY_PX_PER_S / max(1, dist))
+            self.move(lerp(self._stunt_top, self._stunt_far, k, k))
+            if k >= 1.0:
+                if self._stunt_home.x() != self.x():
+                    self.facing = 1 if self._stunt_home.x() > self.x() else -1
+                self._stunt_phase, self._stunt_t0 = "dive", now
+        elif self._stunt_phase == "dive":
+            k = min(1.0, t / self.DIVE_S)
+            self.move(lerp(self._stunt_far, self._stunt_home, smooth(k), k * k))  # swoops down, not a straight line
+            if k >= 1.0:
+                self._stunt_phase = None
+                self._set_state(PetState.IDLE)
+                self.stunt_done.emit()
+        self.moved.emit(self.geometry())
+
+    def _cancel_stunt(self) -> None:
+        if self._stunt_phase is None:
+            return
+        self._stunt_phase = None
+        if self._line is not None:
+            self._line.hide()
+        self.move(self._stunt_home)
+        self.moved.emit(self.geometry())
 
     # --- fetch trip --------------------------------------------------------------------
     def start_trip(self, item: QtGui.QPixmap | None, leg_s: float, pause_s: float) -> None:
@@ -1614,9 +2093,14 @@ class CatWindow(QtWidgets.QWidget):
         self._set_state(state)
         # Naps last longer than the other behaviours.
         self._schedule_behaviour(factor=3.0 if state == PetState.SLEEP else 1.0)
+        if self.sprites.kind.stunts and random.random() < self.STUNT_CHANCE:
+            self.stunt_wanted.emit()  # the controller starts it if nothing else is going on
 
     # --- timers --------------------------------------------------------------------
     def _on_move_tick(self) -> None:
+        if self._stunt_phase is not None:
+            self._stunt_tick()
+            return
         if self._trip_phase in ("out", "back") and not self._dragging:
             step = self._trip_speed * (1 if self._trip_target > self._trip_x else -1)
             if abs(self._trip_target - self._trip_x) <= self._trip_speed:
@@ -1675,6 +2159,8 @@ class CatWindow(QtWidgets.QWidget):
             PetState.ALERT: "alert",
             PetState.SMASH: "smash",
             PetState.RUN: "walk",
+            PetState.ZIP: "zip",
+            PetState.FLY: "fly",
         }.get(self.state, "idle")
         pix = self.sprites.frame(animation, self.facing, self._frame)
         w, h = self.sprites.size.width(), self.sprites.size.height()
@@ -1689,20 +2175,23 @@ class CatWindow(QtWidgets.QWidget):
         shadow_w = w * (0.55 if bounce else 0.65)
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QtGui.QColor(0, 0, 0, 55))
-        p.drawEllipse(QtCore.QPointF(x + w / 2, self.height() - self.GROUND - 2), shadow_w / 2, 4)
+        if self._stunt_phase in (None, "shoot"):  # no ground shadow in mid-air
+            p.drawEllipse(QtCore.QPointF(x + w / 2, self.height() - self.GROUND - 2), shadow_w / 2, 4)
 
         p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, False)
         p.drawPixmap(QtCore.QPointF(x, y), pix)
         p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
 
-        # Head centre sits near art column 15.5 (+1 padding cell); mirror when facing left.
-        cells = CAT_ART_W + 2
-        head_x = x + w * ((16.5 if self.facing == 1 else cells - 16.5) / cells)
+        # Positions are in art cells (with padding); mirror when facing left.
+        kind = self.sprites.kind
+        cells = len(kind.art["stand"][0]) + 2
+        cell = w / cells
+        head_x = x + cell * (kind.head_col if self.facing == 1 else cells - kind.head_col)
         if self.carrying is not None:
-            # Held in the mouth: just in front of the muzzle (art column ~19.5, row ~7.5).
-            size = w * 0.2
-            mouth_x = x + w * ((20.5 if self.facing == 1 else cells - 20.5) / cells)
-            mouth_y = y + h * (8.5 / (len(SPRITE_ART["stand"]) + 2))
+            # Held in the mouth, just in front of the muzzle.
+            size = cell * 4.8
+            mouth_x = x + cell * (kind.mouth[0] if self.facing == 1 else cells - kind.mouth[0])
+            mouth_y = y + cell * kind.mouth[1]
             p.drawPixmap(QtCore.QRectF(mouth_x - size / 2, mouth_y - size / 3, size, size),
                          self.carrying, QtCore.QRectF(self.carrying.rect()))
         if self.state == PetState.ALERT:
@@ -1727,7 +2216,7 @@ class CatWindow(QtWidgets.QWidget):
             self._dragging = False
 
     def mouseMoveEvent(self, event) -> None:
-        if self._press_global is None:
+        if self._press_global is None or self._stunt_phase is not None:
             return
         delta = event.globalPosition().toPoint() - self._press_global
         if not self._dragging and delta.manhattanLength() > 4:
@@ -2554,8 +3043,12 @@ class DesktopPet(QtCore.QObject):
         super().__init__()
         self.cfg = cfg
         self.ui_font = ui_font = load_ui_font()
-        dpr = QtGui.QGuiApplication.primaryScreen().devicePixelRatio()
-        self.sprites = SpriteSheet(cfg.pixel_scale, dpr)
+        self._settings_path = Path(cfg.settings_path) if cfg.settings_path else app_data_dir() / "settings.json"
+        self.routines = self._load_settings()          # also applies the saved pet, size and sitting limit
+        self.settings_window: SettingsWindow | None = None
+        self._look_pending = False                     # a pet/size change waiting for the pet to finish a task
+        self.dpr = QtGui.QGuiApplication.primaryScreen().devicePixelRatio()
+        self.sprites = SpriteSheet(cfg.pixel_scale, self.dpr, PETS[cfg.pet])
         self.cat = CatWindow(self.sprites, cfg, ui_font)
         self.bubble = SpeechBubble(ui_font, cfg.glass_refresh_ms)
         self.tracker = ActivityTracker(cfg)
@@ -2568,9 +3061,10 @@ class DesktopPet(QtCore.QObject):
         self._fight_t0 = 0.0
         self._last_reminder = None
 
-        # Daily routine (water / lunch / home).
+        # Daily routine.
         self._now = datetime.now                       # swappable in tests
-        self._later: dict[str, datetime] = {}          # routine -> when its "Later" is up
+        self._later: dict[str, datetime] = {}          # routine id -> when its "Later" is up
+        self._every_mark: dict[str, float] = {}        # routine id -> tracker.active_s when it last fired
         self._state_path = self.index.cache_path.parent / "state.json"
         self._state = self._load_state()               # e.g. {"lunch": "2026-11-04"} = already shown today
 
@@ -2610,6 +3104,8 @@ class DesktopPet(QtCore.QObject):
         self.cobra.finished.connect(self._on_cobra_finished)
         self.cat.paw_down.connect(lambda: self._arena and self._arena.hit())
         self.cat.trip_done.connect(self._on_trip_done)
+        self.cat.stunt_wanted.connect(self._stunt)
+        self.cat.stunt_done.connect(self._on_stunt_done)
         self._trip_delivery: tuple[str, str] | None = None  # (action, path) waiting for the cat
 
     def start(self) -> None:
@@ -2618,12 +3114,12 @@ class DesktopPet(QtCore.QObject):
         self.index.start()
         self.apps.start()
         self._schedule_chatter()
-        cfg = self.cfg
-        self._say(f"💧 water every {cfg.water_every_s // 60} min\n"
-                  f"🚶 get up and walk: no sitting over {fmt_span(cfg.alert_after_s)}\n"
-                  f"🍱 lunch at {fmt_clock(cfg.lunch_time)}\n"
-                  f"🏠 home at {fmt_clock(cfg.home_time)}\n\nDouble-click me for tricks.",
-                  8000, title="Hi! I'll nudge you: 🐾")
+        lines = [f"🚶 no sitting over {fmt_span(self.cfg.alert_after_s)}"] if self.cfg.walk_on else []
+        active = [r for r in self.routines if r["on"]]
+        lines += [f"{r['title'].rstrip('!')}: {routine_when(r)}" for r in active[:5]]
+        if len(active) > 5:
+            lines.append(f"…and {len(active) - 5} more")
+        self._say("\n".join(lines) + "\n\nDouble-click me for tricks.", 8000, title="Hi! I'll nudge you: 🐾")
 
     def wake_from_launch(self) -> None:
         """Another launch (e.g. the taskbar pin) while running: just say hello."""
@@ -2640,15 +3136,22 @@ class DesktopPet(QtCore.QObject):
         menu.addAction("Cobra mode…", self._start_cobra)
         menu.addAction("Reset break timer", self._reset_timer)
         preview = menu.addMenu("Preview reminders")
-        preview.addAction(f"🚶 Walk (after {fmt_span(self.cfg.alert_after_s)} sitting)", self.tracker.force_alert)
-        preview.addAction("💧 Water", lambda: self._show_routine("water"))
-        preview.addAction("🍱 Lunch", lambda: self._show_routine("lunch"))
-        preview.addAction("🏠 Home", lambda: self._show_routine("home"))
-        preview.addAction("🐍 Cobra fight (practice, deletes nothing)", self._practice_fight)
+        preview.aboutToShow.connect(lambda: self._fill_preview(preview))  # the routine list can change
+        self._fill_preview(preview)
+        menu.addAction("Settings…", self.open_settings)
         menu.addAction("Rebuild file + app index", lambda: (self.index.rescan(), self.apps.refresh()))
         menu.addSeparator()
         menu.addAction("Quit", QtWidgets.QApplication.quit)
         return menu
+
+    def _fill_preview(self, preview: QtWidgets.QMenu) -> None:
+        preview.clear()
+        preview.addAction(f"🚶 Walk (after {fmt_span(self.cfg.alert_after_s)} sitting)", self.tracker.force_alert)
+        for routine in self.routines:
+            preview.addAction(routine["title"], lambda checked=False, key=routine["id"]: self._show_routine(key))
+        preview.addAction("🐍 Cobra fight (practice, deletes nothing)", self._practice_fight)
+        if self.sprites.kind.stunts:
+            preview.addAction("🦸 Hero stunt", self._stunt)
 
     def _build_tray(self):
         if not QtWidgets.QSystemTrayIcon.isSystemTrayAvailable():
@@ -2669,7 +3172,8 @@ class DesktopPet(QtCore.QObject):
 
     def _chatter(self) -> None:
         if self.cat.mode is None and not self.bubble.isVisible():
-            line = random.choice(CHATTER + [f"You've been at it for {fmt_duration(self.tracker.session_s)}."])
+            line = random.choice(CHATTER + list(self.sprites.kind.chatter)
+                                 + [f"You've been at it for {fmt_duration(self.tracker.session_s)}."])
             self._say(line, 3500)
         self._schedule_chatter()
 
@@ -2698,22 +3202,155 @@ class DesktopPet(QtCore.QObject):
         if self.cobra.busy:
             self._say("Still hissing at your caches… 🐍", 2500)
             return
-        self._say("", 9000, title="Meow? What should I do? 🐾",
-                  buttons=[("fetch", "🔎 Fetch a file"), ("cobra", "🐍 Cobra mode")])
+        if self.cat.mode == "stunt":
+            return  # it'll land in a moment
+        self._say("", 9000, title=f"{self.sprites.kind.hello} What should I do? 🐾",
+                  buttons=[("fetch", "🔎 Fetch a file"), ("cobra", "🐍 Cobra mode"), ("settings", "⚙ Settings")])
 
     def _on_choice(self, key: str) -> None:
         if key == "fetch":
             self._open_fetch()
         elif key == "cobra":
             self._start_cobra()
+        elif key == "settings":
+            self.open_settings()
         elif key == "cobra_go":
             self._strike()
         elif key == "cobra_cancel":
             self._cancel_cobra()
-        elif key in ROUTINE_REPLIES or key.endswith("_later"):
+        elif key.endswith(("_ok", "_later")):
             self._routine_answer(key)
 
-    # --- daily routine: water, lunch, home ---------------------------------------
+    # --- hero stunt ------------------------------------------------------------------
+    def _stunt(self) -> None:
+        """Only when nothing else is going on, and never over an open bubble."""
+        if (self.sprites.kind.stunts and self.cat.mode is None and not self.tracker.away
+                and not self.bubble.isVisible()):
+            self.cat.start_stunt()
+
+    def _on_stunt_done(self) -> None:
+        if self.tracker.away:
+            self.cat.set_mode("away")
+        else:
+            self._release_cat()
+
+    # --- settings: pet, size, routines (saved to settings.json) ----------------------
+    def _load_settings(self) -> list[dict]:
+        """Apply the saved pet, size and sitting limit to cfg; return the routine list.
+        Command-line flags (cfg.overrides) win over anything saved."""
+        cfg = self.cfg
+        try:
+            saved = json.loads(self._settings_path.read_text(encoding="utf-8"))
+            saved = saved if isinstance(saved, dict) else {}
+        except (OSError, ValueError):
+            saved = {}
+        if saved.get("pet") in PETS:
+            cfg.pet = saved["pet"]
+        if cfg.pet not in PETS:
+            cfg.pet = "cat"
+        cfg.walk_on = bool(saved.get("walk_on", cfg.walk_on))
+        try:
+            if "scale" not in cfg.overrides and "scale" in saved:
+                cfg.pixel_scale = max(1, min(20, int(saved["scale"])))
+            if "alert" not in cfg.overrides and "sit_minutes" in saved:
+                cfg.alert_after_s = int(max(1.0, float(saved["sit_minutes"])) * 60)
+        except (TypeError, ValueError):
+            pass
+        raw = saved.get("routines")
+        routines = default_routines(cfg)
+        if isinstance(raw, list):
+            routines = [r for r in map(clean_routine, raw) if r]
+        for routine in routines:
+            if routine["id"] == "water" and "water" in cfg.overrides:
+                routine["minutes"] = cfg.water_every_s / 60
+            if routine["id"] == "lunch" and "lunch" in cfg.overrides:
+                routine["time"] = cfg.lunch_time
+            if routine["id"] == "home" and "home" in cfg.overrides:
+                routine["time"] = cfg.home_time
+        return routines
+
+    def _save_settings(self) -> None:
+        if self.cfg.overrides:
+            return  # flags like --demo are for this run only; don't save their fast timers
+        data = {"pet": self.cfg.pet, "scale": self.cfg.pixel_scale, "walk_on": self.cfg.walk_on,
+                "sit_minutes": self.cfg.alert_after_s / 60, "routines": self.routines}
+        try:
+            self._settings_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._settings_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+            os.replace(tmp, self._settings_path)
+        except OSError:
+            pass
+
+    def open_settings(self) -> None:
+        if self.settings_window is None:
+            self.settings_window = SettingsWindow(self)
+        self.settings_window.refresh()
+        self.settings_window.show()
+        self.settings_window.raise_()
+        self.settings_window.activateWindow()
+        force_foreground(self.settings_window)
+
+    def set_look(self, pet: str, scale: int) -> None:
+        """Change the pet and/or its size. Waits if the pet is in the middle of a task."""
+        changed_pet = pet != self.cfg.pet
+        self.cfg.pet, self.cfg.pixel_scale = pet, scale
+        self._save_settings()
+        self._look_pending = True
+        self._apply_look()
+        if changed_pet and not self._look_pending and not self.bubble.has_buttons:
+            self._say(f"{self.sprites.kind.hello.rstrip('?!')}! 🐾", 2000)
+
+    def _apply_look(self) -> None:
+        if not self._look_pending or self.cat.busy or self._arena is not None:
+            return
+        self._look_pending = False
+        self.sprites = SpriteSheet(self.cfg.pixel_scale, self.dpr, PETS[self.cfg.pet])
+        self.cat.set_sprites(self.sprites)
+        if self.tray:
+            self.tray.setIcon(QtGui.QIcon(self.sprites.frames["stand"][1]))
+
+    def set_walk(self, on: bool, minutes: float) -> None:
+        self.cfg.walk_on, self.cfg.alert_after_s = on, int(minutes * 60)
+        self._save_settings()
+        if not on and self.tracker.alert_active:
+            self.tracker.acknowledge()
+            self._rotate_timer.stop()
+            self._snooze_timer.stop()
+            self.bubble.hide()
+            if not self.cat.busy:
+                self.cat.set_mode(None)
+
+    def set_routines(self, routines: list[dict]) -> None:
+        """Replace the routine list. A routine whose schedule changed starts afresh: it may
+        fire again today at its new time, and its minutes count from now."""
+        old = {r["id"]: r for r in self.routines}
+        for routine in routines:
+            before = old.get(routine["id"])
+            if before is None or any(before[f] != routine[f] for f in ("kind", "time", "minutes")):
+                self._state.pop(routine["id"], None)
+                self._every_mark[routine["id"]] = self.tracker.active_s
+                self._later.pop(routine["id"], None)
+            if not routine["on"]:
+                self._later.pop(routine["id"], None)
+        kept = {r["id"] for r in routines}
+        for key in set(old) - kept:
+            self._state.pop(key, None)
+            self._later.pop(key, None)
+            self._every_mark.pop(key, None)
+        self.routines = routines
+        self._save_state()
+        self._save_settings()
+
+    # --- daily routine -----------------------------------------------------------
+    def _routine(self, key: str) -> dict | None:
+        return next((r for r in self.routines if r["id"] == key), None)
+
+    def _every_left(self, routine: dict) -> float:
+        """Seconds of screen time until an every-N-minutes routine is due."""
+        mark = self._every_mark.setdefault(routine["id"], self.tracker.active_s)
+        return routine["minutes"] * 60 - (self.tracker.active_s - mark)
+
     def _check_routine(self) -> None:
         """Runs every tracker tick. Waits while you're away, the cat is mid-task or a
         question bubble is open, so reminders never stack on top of each other."""
@@ -2725,42 +3362,49 @@ class DesktopPet(QtCore.QObject):
                 del self._later[key]
                 self._show_routine(key)
                 return
-        if now.weekday() in self.cfg.routine_days:
-            today = now.date().isoformat()
-            for key, hhmm in (("lunch", self.cfg.lunch_time), ("home", self.cfg.home_time)):
-                h, m = (int(x) for x in hhmm.split(":"))
+        today = now.date().isoformat()
+        for routine in self.routines:
+            key = routine["id"]
+            if not routine["on"] or now.weekday() not in routine["days"] or key in self._later:
+                continue
+            if routine["kind"] == "time":
+                h, m = (int(x) for x in routine["time"].split(":"))
                 at = now.replace(hour=h, minute=m, second=0, microsecond=0)
-                if (self._state.get(key) != today and key not in self._later
-                        and at <= now < at + timedelta(minutes=self.cfg.clock_window_min)):
+                if self._state.get(key) != today and at <= now < at + timedelta(minutes=self.cfg.clock_window_min):
                     self._state[key] = today  # once a day, even across restarts
                     self._save_state()
                     self._show_routine(key)
                     return
-        if (self.tracker.water_s >= self.cfg.water_every_s and "water" not in self._later
-                and not self.tracker.alert_active):  # the walk alert comes first
-            self.tracker.water_s = 0.0
-            self._show_routine("water")
+            elif self._every_left(routine) <= 0 and not self.tracker.alert_active:  # the walk alert comes first
+                self._every_mark[key] = self.tracker.active_s
+                self._show_routine(key)
+                return
 
     def _show_routine(self, key: str) -> None:
-        title, body, buttons = ROUTINE[key]
-        hhmm = {"lunch": self.cfg.lunch_time, "home": self.cfg.home_time}.get(key)
-        if key != "water":
-            buttons = [(k, f"{self.cfg.clock_later_s // 60} more min" if k.endswith("_later") else label)
-                       for k, label in buttons]
-        text = body.format(time=fmt_clock(hhmm) if hhmm else "", every=self.cfg.water_every_s // 60)
-        self.bubble.show_message(text, self.cat.geometry(),
-                                 title=title, buttons=buttons,
-                                 timeout_ms=60_000 if key == "water" else 0)  # lunch/home wait for an answer
+        routine = self._routine(key)
+        if routine is not None:
+            self.show_routine_bubble(routine)
+
+    def show_routine_bubble(self, routine: dict) -> None:
+        every = routine["kind"] == "every"
+        later = "Later" if every else f"{self.cfg.clock_later_s // 60} more min"
+        text = (routine["message"].replace("{time}", fmt_clock(routine["time"]))
+                .replace("{every}", fmt_span(routine["minutes"] * 60)))
+        self.bubble.show_message(text, self.cat.geometry(), title=routine["title"],
+                                 buttons=[(f"{routine['id']}_ok", routine["ok"]), (f"{routine['id']}_later", later)],
+                                 timeout_ms=60_000 if every else 0)  # set-time routines wait for an answer
 
     def _routine_answer(self, key: str) -> None:
+        routine = self._routine(key.rsplit("_", 1)[0])
+        if routine is None:
+            return  # a preview of a routine that isn't saved yet, or one just deleted
         if key.endswith("_later"):
-            routine = key[:-len("_later")]
-            delay = self.cfg.water_later_s if routine == "water" else self.cfg.clock_later_s
-            self._later[routine] = self._now() + timedelta(seconds=delay)
+            delay = self.cfg.water_later_s if routine["kind"] == "every" else self.cfg.clock_later_s
+            self._later[routine["id"]] = self._now() + timedelta(seconds=delay)
             when = f"{delay // 60} min" if delay >= 60 else f"{delay} s"
             self._say(f"Okay, I'll ask again in {when}. 🐾", 2500)
         else:
-            self._say(ROUTINE_REPLIES[key], 3000)
+            self._say(routine["reply"], 3000)
 
     def _load_state(self) -> dict:
         try:
@@ -2940,7 +3584,7 @@ class DesktopPet(QtCore.QObject):
         self._rotate_timer.stop()
         self._snooze_timer.stop()
         self.cat.set_mode(None)
-        self._say(f"Thanks! Next walk in {fmt_span(self.cfg.alert_after_s)}. 😺", 3500)
+        self._say(f"Thanks! Next walk in {fmt_span(self.cfg.alert_after_s)}. 🐾", 3500)
 
     def _reset_timer(self) -> None:
         if self.tracker.alert_active:
@@ -2952,11 +3596,15 @@ class DesktopPet(QtCore.QObject):
     # --- signal handlers -----------------------------------------------------------
     def _on_tick(self, session_s: float, idle_s: float) -> None:
         state = "away" if self.tracker.away else f"active {fmt_duration(session_s)}"
-        water_left = max(0.0, self.cfg.water_every_s - self.tracker.water_s)
-        self._status_action.setText(f"Session: {state}  ·  water in {fmt_duration(water_left)}  ·  "
-                                    f"{fmt_count(self.index.count())} files indexed")
+        waiting = [(self._every_left(r), r) for r in self.routines if r["on"] and r["kind"] == "every"]
+        soonest = ""
+        if waiting:
+            left, routine = min(waiting, key=lambda pair: pair[0])
+            soonest = f"{routine['title']} in {fmt_duration(max(0.0, left))}  ·  "
+        self._status_action.setText(f"Session: {state}  ·  {soonest}{fmt_count(self.index.count())} files indexed")
         if self.tray:
             self.tray.setToolTip(f"Desktop Cat - {state}")
+        self._apply_look()
         self._check_routine()
 
     def _on_cat_moved(self, geometry: QtCore.QRect) -> None:
@@ -2970,7 +3618,7 @@ class DesktopPet(QtCore.QObject):
             self._acknowledge()
         else:
             self.cat.wake_up()
-            self._say("Purr ♥\n" + self._status_text(), 4000)
+            self._say(self.sprites.kind.pet_line + "\n" + self._status_text(), 4000)
 
     def _on_bubble_clicked(self) -> None:
         if self.tracker.alert_active and not self.cat.busy:
@@ -3003,6 +3651,390 @@ class DesktopPet(QtCore.QObject):
             self._say(f"Welcome back! Resuming at {fmt_duration(self.tracker.session_s)}.", 3500)
         else:
             self._say("Welcome back! Fresh session started. 🐾", 3500)
+
+
+# =================================================================================
+# Settings window: pet, size, routines
+# =================================================================================
+SETTINGS_QSS = """
+QDialog, QWidget#page { background: #1e1e20; color: #f5f5f7; }
+QLabel, QCheckBox, QRadioButton { color: #f5f5f7; background: transparent; }
+QLabel#hint { color: #a1a1a6; }
+QCheckBox::indicator, QListWidget::indicator { width: 14px; height: 14px; border: 2px solid #8e8e93; border-radius: 4px; background: transparent; }
+QRadioButton::indicator { width: 14px; height: 14px; border: 2px solid #8e8e93; border-radius: 9px; background: transparent; }
+QCheckBox::indicator:checked, QListWidget::indicator:checked, QRadioButton::indicator:checked { background: #f5f5f7; border-color: #f5f5f7; }
+QTabWidget::pane { border: 1px solid #3a3a3c; border-radius: 8px; top: -1px; }
+QTabBar::tab { background: transparent; color: #a1a1a6; padding: 8px 18px; }
+QTabBar::tab:selected { color: #f5f5f7; border-bottom: 2px solid #f5f5f7; }
+QToolButton#tile { background: #2c2c2e; color: #f5f5f7; border: 2px solid transparent; border-radius: 10px; padding: 6px; }
+QToolButton#tile:hover { background: #3a3a3c; }
+QToolButton#tile:checked { border-color: #f5f5f7; background: #3a3a3c; }
+QToolButton#day { background: #2c2c2e; color: #a1a1a6; border: none; border-radius: 6px; padding: 6px 8px; }
+QToolButton#day:checked { background: #f5f5f7; color: #1c1c1e; }
+QPushButton { background: #3a3a3c; color: #f5f5f7; border: none; border-radius: 8px; padding: 7px 14px; }
+QPushButton:hover { background: #48484a; }
+QPushButton:disabled { color: #636366; background: #2c2c2e; }
+QPushButton#primary { background: #f5f5f7; color: #1c1c1e; }
+QLineEdit, QSpinBox, QTimeEdit { background: #2c2c2e; color: #f5f5f7; border: 1px solid #3a3a3c; border-radius: 6px; padding: 5px; }
+QListWidget { background: #2c2c2e; color: #f5f5f7; border: none; border-radius: 8px; padding: 4px; outline: 0; }
+QListWidget::item { padding: 7px 4px; border-radius: 6px; }
+QListWidget::item:selected { background: #48484a; color: #f5f5f7; }
+QSlider::groove:horizontal { height: 4px; background: #48484a; border-radius: 2px; }
+QSlider::handle:horizontal { background: #f5f5f7; width: 16px; height: 16px; margin: -6px 0; border-radius: 8px; }
+"""
+
+
+def dark_title_bar(window: QtWidgets.QWidget) -> None:
+    """Match the title bar to the dark window (Windows 10 2004+; harmless elsewhere)."""
+    if sys.platform != "win32":
+        return
+    try:
+        value = ctypes.c_int(1)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(int(window.winId()), 20, ctypes.byref(value), ctypes.sizeof(value))
+    except (AttributeError, OSError):
+        pass
+
+
+class RoutineEditor(QtWidgets.QDialog):
+    """Add or change one routine. `result_routine()` gives the edited copy after accept()."""
+
+    def __init__(self, pet: "DesktopPet", routine: dict | None, parent: QtWidgets.QWidget) -> None:
+        super().__init__(parent)
+        self.pet = pet
+        self.setWindowTitle("Edit routine" if routine else "New routine")
+        self.setStyleSheet(SETTINGS_QSS)
+        self.setMinimumWidth(420)
+        self._base = dict(routine) if routine else {
+            "id": "r" + os.urandom(4).hex(), "title": "", "message": "", "kind": "time", "minutes": 60,
+            "time": "09:00", "days": list(range(7)), "on": True, "ok": "Done ✅", "reply": "Nice work! 🐾"}
+        base = self._base
+
+        self.name = QtWidgets.QLineEdit(base["title"])
+        self.name.setPlaceholderText("🧘 Stretch")
+        self.name.setMaxLength(40)
+        self.message = QtWidgets.QLineEdit(base["message"])
+        self.message.setPlaceholderText("Roll your shoulders and look away from the screen.")
+        self.message.setMaxLength(160)
+
+        self.at_time = QtWidgets.QRadioButton("Once a day at")
+        self.every = QtWidgets.QRadioButton("Every")
+        self.time = QtWidgets.QTimeEdit(QtCore.QTime.fromString(base["time"], "HH:mm"))
+        self.time.setDisplayFormat("h:mm AP")
+        self.minutes = QtWidgets.QSpinBox()
+        self.minutes.setRange(1, 600)
+        self.minutes.setValue(max(1, round(base["minutes"])))
+        self.minutes.setSuffix(" min of screen time")
+        self.time.setMinimumHeight(32)  # the row would otherwise clip the text on scaled displays
+        self.minutes.setMinimumHeight(32)
+        (self.every if base["kind"] == "every" else self.at_time).setChecked(True)
+        self.at_time.toggled.connect(self._sync)
+
+        self.day_buttons = []
+        days = QtWidgets.QHBoxLayout()
+        days.setSpacing(4)
+        for i, name in enumerate(DAY_NAMES):
+            button = QtWidgets.QToolButton()
+            button.setObjectName("day")
+            button.setText(name)
+            button.setCheckable(True)
+            button.setChecked(i in base["days"])
+            button.toggled.connect(self._sync)
+            self.day_buttons.append(button)
+            days.addWidget(button)
+        days.addStretch()
+
+        hint = QtWidgets.QLabel("{time} and {every} in the message fill themselves in.")
+        hint.setObjectName("hint")
+        schedule = QtWidgets.QGridLayout()
+        schedule.addWidget(self.at_time, 0, 0)
+        schedule.addWidget(self.time, 0, 1)
+        schedule.addWidget(self.every, 1, 0)
+        schedule.addWidget(self.minutes, 1, 1)
+        schedule.setColumnStretch(1, 1)
+        schedule.setVerticalSpacing(6)
+        schedule.setRowMinimumHeight(0, 34)
+        schedule.setRowMinimumHeight(1, 34)
+
+        form = QtWidgets.QFormLayout()
+        form.addRow("Name", self.name)
+        form.addRow("Message", self.message)
+        form.addRow("", hint)
+        schedule.setContentsMargins(0, 0, 0, 0)
+        schedule_box = QtWidgets.QWidget()  # a nested layout alone gets squeezed by the form
+        schedule_box.setLayout(schedule)
+        form.addRow("When", schedule_box)
+        form.addRow("Days", days)
+
+        try_it = QtWidgets.QPushButton("Try it")
+        try_it.clicked.connect(lambda: self.pet.show_routine_bubble(self.result_routine()))
+        cancel = QtWidgets.QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        self.save = QtWidgets.QPushButton("Save")
+        self.save.setObjectName("primary")
+        self.save.setDefault(True)
+        self.save.clicked.connect(self.accept)
+        self.name.textChanged.connect(self._sync)
+        buttons = QtWidgets.QHBoxLayout()
+        buttons.addWidget(try_it)
+        buttons.addStretch()
+        buttons.addWidget(cancel)
+        buttons.addWidget(self.save)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addSpacing(8)
+        layout.addLayout(buttons)
+        self._sync()
+        dark_title_bar(self)
+
+    def _sync(self) -> None:
+        self.time.setEnabled(self.at_time.isChecked())
+        self.minutes.setEnabled(self.every.isChecked())
+        self.save.setEnabled(bool(self.name.text().strip()) and any(b.isChecked() for b in self.day_buttons))
+
+    def result_routine(self) -> dict:
+        routine = dict(self._base)
+        routine["title"] = self.name.text().strip() or "🐾 Reminder"
+        routine["message"] = self.message.text().strip()
+        routine["kind"] = "time" if self.at_time.isChecked() else "every"
+        routine["time"] = self.time.time().toString("HH:mm")
+        if self.minutes.value() != max(1, round(self._base["minutes"])):
+            routine["minutes"] = self.minutes.value()  # untouched fractions (demo timers) stay as they are
+        routine["days"] = [i for i, b in enumerate(self.day_buttons) if b.isChecked()]
+        return routine
+
+
+class SettingsWindow(QtWidgets.QDialog):
+    """Pet picker, size slider and the routine list. Every change applies and saves at once."""
+
+    PREVIEW_UNIT = 3
+
+    def __init__(self, pet: "DesktopPet") -> None:
+        super().__init__(None)
+        self.pet = pet
+        self.setWindowTitle("Desktop Cat settings")
+        self.setStyleSheet(SETTINGS_QSS)
+        self.setFont(pet.ui_font.make(10))
+        self.setMinimumWidth(520)
+
+        tabs = QtWidgets.QTabWidget()
+        tabs.addTab(self._build_pet_tab(), "Pet")
+        tabs.addTab(self._build_routine_tab(), "Routines")
+        close = QtWidgets.QPushButton("Close")
+        close.setObjectName("primary")
+        close.clicked.connect(self.hide)
+        bottom = QtWidgets.QHBoxLayout()
+        if pet.cfg.overrides:
+            note = QtWidgets.QLabel("Started with command-line options: changes last until you quit.")
+            note.setObjectName("hint")
+            bottom.addWidget(note)
+        bottom.addStretch()
+        bottom.addWidget(close)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.addWidget(tabs)
+        layout.addLayout(bottom)
+
+        # The chosen pet walks in its tile while the window is open.
+        self._walk_frame = 0
+        self._walk_timer = QtCore.QTimer(self)
+        self._walk_timer.setInterval(pet.cfg.frame_interval_ms)
+        self._walk_timer.timeout.connect(self._walk_tick)
+        dark_title_bar(self)
+
+    # --- pet tab ---------------------------------------------------------------------
+    def _build_pet_tab(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        page.setObjectName("page")
+        grid = QtWidgets.QGridLayout()
+        grid.setSpacing(8)
+        self._previews = {key: SpriteSheet(self.PREVIEW_UNIT, self.pet.dpr, kind) for key, kind in PETS.items()}
+        self._tiles: dict[str, QtWidgets.QToolButton] = {}
+        group = QtWidgets.QButtonGroup(self)
+        for i, (key, kind) in enumerate(PETS.items()):
+            tile = QtWidgets.QToolButton()
+            tile.setObjectName("tile")
+            tile.setText(kind.label)
+            tile.setCheckable(True)
+            tile.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+            tile.setIconSize(QtCore.QSize(90, 72))
+            tile.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Preferred)
+            tile.setIcon(QtGui.QIcon(self._previews[key].frames["stand"][1]))
+            tile.clicked.connect(lambda checked=False, k=key: self._choose_pet(k))
+            group.addButton(tile)
+            self._tiles[key] = tile
+            grid.addWidget(tile, i // 3, i % 3)
+
+        self.size_slider = QtWidgets.QSlider(Qt.Orientation.Horizontal)
+        self.size_slider.setRange(0, len(SIZES) - 1)
+        self.size_slider.setPageStep(1)
+        self.size_label = QtWidgets.QLabel()
+        self.size_label.setMinimumWidth(60)
+        self.size_slider.valueChanged.connect(self._choose_size)
+        size = QtWidgets.QHBoxLayout()
+        size.addWidget(QtWidgets.QLabel("Size"))
+        size.addWidget(self.size_slider, 1)
+        size.addWidget(self.size_label)
+
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.addLayout(grid)
+        layout.addSpacing(10)
+        layout.addLayout(size)
+        return page
+
+    def _size_index(self) -> int:
+        scale = self.pet.cfg.pixel_scale
+        return min(range(len(SIZES)), key=lambda i: abs(SIZES[i][1] - scale))
+
+    def _choose_pet(self, key: str) -> None:
+        for other, tile in self._tiles.items():
+            tile.setIcon(QtGui.QIcon(self._previews[other].frames["stand"][1]))
+        self.pet.set_look(key, self.pet.cfg.pixel_scale)
+
+    def _choose_size(self, index: int) -> None:
+        name, scale = SIZES[index]
+        self.size_label.setText(name)
+        if scale != self.pet.cfg.pixel_scale and self.isVisible():
+            self.pet.set_look(self.pet.cfg.pet, scale)
+
+    def _walk_tick(self) -> None:
+        self._walk_frame += 1
+        name = ("walk_a", "stand", "walk_b", "stand")[self._walk_frame % 4]
+        key = self.pet.cfg.pet
+        self._tiles[key].setIcon(QtGui.QIcon(self._previews[key].frames[name][1]))
+
+    # --- routines tab ----------------------------------------------------------------
+    def _build_routine_tab(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        page.setObjectName("page")
+        self.walk_on = QtWidgets.QCheckBox("🚶 Get up and walk after sitting for")
+        self.walk_minutes = QtWidgets.QSpinBox()
+        self.walk_minutes.setRange(5, 240)
+        self.walk_minutes.setSuffix(" min")
+        self.walk_on.toggled.connect(self._walk_changed)
+        self.walk_minutes.valueChanged.connect(self._walk_changed)
+        walk = QtWidgets.QHBoxLayout()
+        walk.addWidget(self.walk_on)
+        walk.addWidget(self.walk_minutes)
+        walk.addStretch()
+
+        self.list = QtWidgets.QListWidget()
+        self.list.setMinimumHeight(220)
+        self.list.itemChanged.connect(self._item_toggled)
+        self.list.itemDoubleClicked.connect(lambda item: self._edit())
+        self.list.currentRowChanged.connect(self._sync_buttons)
+
+        add = QtWidgets.QPushButton("Add")
+        add.setObjectName("primary")
+        add.clicked.connect(self._add)
+        self.edit_button = QtWidgets.QPushButton("Edit")
+        self.edit_button.clicked.connect(self._edit)
+        self.delete_button = QtWidgets.QPushButton("Delete")
+        self.delete_button.clicked.connect(self._delete)
+        reset = QtWidgets.QPushButton("Restore defaults")
+        reset.clicked.connect(self._reset)
+        buttons = QtWidgets.QHBoxLayout()
+        for button in (add, self.edit_button, self.delete_button):
+            buttons.addWidget(button)
+        buttons.addStretch()
+        buttons.addWidget(reset)
+
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.addLayout(walk)
+        layout.addSpacing(6)
+        layout.addWidget(self.list, 1)
+        layout.addLayout(buttons)
+        return page
+
+    def _fill_list(self) -> None:
+        row = self.list.currentRow()
+        self.list.blockSignals(True)
+        self.list.clear()
+        for routine in self.pet.routines:
+            item = QtWidgets.QListWidgetItem(f"{routine['title']}   ·   {routine_when(routine)}")
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if routine["on"] else Qt.CheckState.Unchecked)
+            self.list.addItem(item)
+        self.list.blockSignals(False)
+        self.list.setCurrentRow(min(row, self.list.count() - 1))
+        self._sync_buttons()
+
+    def _sync_buttons(self) -> None:
+        has_row = self.list.currentRow() >= 0
+        self.edit_button.setEnabled(has_row)
+        self.delete_button.setEnabled(has_row)
+
+    def _walk_changed(self) -> None:
+        self.walk_minutes.setEnabled(self.walk_on.isChecked())
+        if not self.signalsBlocked():
+            self.pet.set_walk(self.walk_on.isChecked(), self.walk_minutes.value())
+
+    def _item_toggled(self, item: QtWidgets.QListWidgetItem) -> None:
+        row = self.list.row(item)
+        routines = [dict(r) for r in self.pet.routines]
+        routines[row]["on"] = item.checkState() == Qt.CheckState.Checked
+        self.pet.set_routines(routines)
+
+    def _add(self) -> None:
+        editor = RoutineEditor(self.pet, None, self)
+        if editor.exec():
+            self.pet.set_routines(self.pet.routines + [editor.result_routine()])
+            self._fill_list()
+            self.list.setCurrentRow(self.list.count() - 1)
+
+    def _edit(self) -> None:
+        row = self.list.currentRow()
+        if row < 0:
+            return
+        editor = RoutineEditor(self.pet, self.pet.routines[row], self)
+        if editor.exec():
+            routines = list(self.pet.routines)
+            routines[row] = editor.result_routine()
+            self.pet.set_routines(routines)
+            self._fill_list()
+
+    def _confirm(self, question: str) -> bool:
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle("Desktop Cat")
+        box.setText(question)
+        box.setStyleSheet(SETTINGS_QSS)
+        box.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.Cancel)
+        return box.exec() == QtWidgets.QMessageBox.StandardButton.Yes
+
+    def _delete(self) -> None:
+        row = self.list.currentRow()
+        if row >= 0 and self._confirm(f"Delete “{self.pet.routines[row]['title']}”?"):
+            self.pet.set_routines(self.pet.routines[:row] + self.pet.routines[row + 1:])
+            self._fill_list()
+
+    def _reset(self) -> None:
+        if self._confirm("Restore water, lunch and home to their defaults?\nRoutines you added will be removed."):
+            self.pet.set_routines(default_routines(Config()))
+            self._fill_list()
+
+    # --- window ----------------------------------------------------------------------
+    def refresh(self) -> None:
+        """Show the current values, without treating that as a change."""
+        cfg = self.pet.cfg
+        self.blockSignals(True)
+        self.walk_on.setChecked(cfg.walk_on)
+        self.walk_minutes.setValue(round(cfg.alert_after_s / 60))
+        self.walk_minutes.setEnabled(cfg.walk_on)
+        self.blockSignals(False)
+        self._tiles[cfg.pet].setChecked(True)
+        index = self._size_index()
+        self.size_slider.blockSignals(True)
+        self.size_slider.setValue(index)
+        self.size_slider.blockSignals(False)
+        self.size_label.setText(SIZES[index][0])
+        self._fill_list()
+
+    def showEvent(self, event) -> None:
+        self._walk_timer.start()
+        super().showEvent(event)
+
+    def hideEvent(self, event) -> None:
+        self._walk_timer.stop()
+        super().hideEvent(event)
 
 
 # =================================================================================
@@ -3146,23 +4178,29 @@ def parse_args(argv: list[str]) -> tuple[Config, argparse.Namespace]:
     args = parser.parse_args(argv)
 
     cfg = Config.demo() if args.demo else Config()
+    overrides = ["alert", "water"] if args.demo else []
     if args.alert_minutes:
         cfg.alert_after_s = int(args.alert_minutes * 60)
+        overrides.append("alert")
     if args.idle_minutes:
         cfg.idle_threshold_s = int(args.idle_minutes * 60)
     if args.idle_policy:
         cfg.idle_policy = args.idle_policy
     if args.scale:
         cfg.pixel_scale = max(1, args.scale)
+        overrides.append("scale")
     if args.index:
         cfg.index_roots = tuple(str(Path(p).resolve()) for p in args.index)
     if args.water_minutes:
         cfg.water_every_s = int(args.water_minutes * 60)
+        overrides.append("water")
     for name in ("lunch", "home"):
         value = getattr(args, name)
         if value:
             fmt_clock(value)  # validates HH:MM (raises ValueError otherwise)
             setattr(cfg, f"{name}_time", value)
+            overrides.append(name)
+    cfg.overrides = tuple(overrides)
     return cfg, args
 
 

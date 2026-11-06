@@ -21,6 +21,8 @@ Single Python file · PyQt6 · no build step · 100% local processing.
 
 Idle detection tracks hardware input activity so genuine time away from your desk counts as rest. Notifications never pile up, and routine prompts include a "10 more min" snooze option.
 
+These are only the starting set. In **Settings → Routines** you can change them, switch them off, or add your own, either at a set time or every so many minutes of screen time, on the days you choose.
+
 <p align="center">
   <img src="docs/screenshots/walk.png" width="360" alt="Sitting reminder">
   <img src="docs/screenshots/lunch.png" width="360" alt="Lunch reminder">
@@ -49,6 +51,14 @@ Safety boundaries:
 - Directory junctions and symlinks are never traversed.
 - All disk operations run at low background I/O priority.
 - Right-click → *Preview reminders → Cobra fight (practice)* tests the animation with zero filesystem changes.
+
+### 🐾 Choose Your Pet
+Double-click → **Settings** to pick a **tabby cat, golden retriever, hamster, bunny, penguin or caped hero**, and set its size from Tiny to Huge. Each pet has its own sounds and small talk. The caped hero also shows off now and then: it fires a grapple line, zips to the top of the screen, flies across and dives back down.
+
+<p align="center">
+  <img src="docs/screenshots/settings_pet.png" width="380" alt="Choosing a pet and its size">
+  <img src="docs/screenshots/settings_routines.png" width="380" alt="Editing routines">
+</p>
 
 ### ✨ Visual Design
 Subtle frosted glass dialogue styling, clean pixel scaling across mixed-DPI displays, and clean typographic fallbacks using system sans-serif fonts.
@@ -104,12 +114,12 @@ python desktop_cat.py --demo
 | Action | Response |
 |---|---|
 | Single Click | Display status (current desk duration, next break) or dismiss prompt |
-| Double Click | Open action menu (**Fetch a file** or **Cleanup mode**) |
-| Right Click | Context menu (Status, Fetch, Cleanup, Timer Reset, Animation Previews, Reindex, Quit) |
+| Double Click | Open action menu (**Fetch a file**, **Cleanup mode** or **Settings**) |
+| Right Click | Context menu (Status, Fetch, Cleanup, Timer Reset, Animation Previews, Settings, Reindex, Quit) |
 | Click & Drag | Reposition companion across displays |
 
 ## Configuration
-All options can be defined within the `Config` dataclass in `desktop_cat.py` or passed via CLI flags:
+Pet, size, sitting limit and routines are set in the **Settings** window and saved in `settings.json`. Everything else can be defined within the `Config` dataclass in `desktop_cat.py`. The flags below override the saved settings for one run, and nothing is saved during that run:
 
 | Parameter | Default | Command Line Argument |
 |---|---|---|
@@ -123,7 +133,7 @@ All options can be defined within the `Config` dataclass in `desktop_cat.py` or 
 | `cobra_min_age_h` | 24 hours | Age cutoff for temporary file cleanup |
 
 ## Data & Privacy
-All computation occurs locally on your machine. No telemetry, usage statistics, or personal data are collected or transmitted over the network. The local search index is stored exclusively within `%LOCALAPPDATA%\DesktopCat\` (macOS: `~/Library/Application Support/DesktopCat/`) and can be purged at any time.
+All computation occurs locally on your machine. No telemetry, usage statistics, or personal data are collected or transmitted over the network. The local search index and your settings are stored exclusively within `%LOCALAPPDATA%\DesktopCat\` (macOS: `~/Library/Application Support/DesktopCat/`) and can be purged at any time.
 
 ## Project Structure
 ```
